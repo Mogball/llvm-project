@@ -91,13 +91,14 @@ protected:
   /// This constructor is used by derived classes as part of the TypeUniquer.
   TypeStorage() : abstractType(nullptr) {}
 
-private:
+public:
   /// Set the abstract type for this storage instance. This is used by the
   /// TypeUniquer when initializing a newly constructed type storage object.
   void initialize(const AbstractType &abstractTy) {
     abstractType = &abstractTy;
   }
 
+private:
   /// The abstract description for this type.
   const AbstractType *abstractType;
 };

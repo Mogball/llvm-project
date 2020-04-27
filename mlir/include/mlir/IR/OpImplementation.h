@@ -267,6 +267,9 @@ public:
   /// Return the location of the original name token.
   virtual llvm::SMLoc getNameLoc() const = 0;
 
+  /// Re-encode the given source location as an MLIR location and return it.
+  virtual Location getEncodedSourceLoc(llvm::SMLoc loc) = 0;
+
   // These methods emit an error and return failure or success. This allows
   // these to be chained together into a linear sequence of || expressions in
   // many cases.
@@ -307,8 +310,14 @@ public:
   /// Parse a '<' token.
   virtual ParseResult parseLess() = 0;
 
+  /// Parse a '<' token if present.
+  virtual ParseResult parseOptionalLess() = 0;
+
   /// Parse a '>' token.
   virtual ParseResult parseGreater() = 0;
+
+  /// Parse a '>' token if present.
+  virtual ParseResult parseOptionalGreater() = 0;
 
   /// Parse a given keyword.
   ParseResult parseKeyword(StringRef keyword, const Twine &msg = "") {

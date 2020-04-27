@@ -38,7 +38,8 @@ std::unique_ptr<Pass> createCanonicalizerPass();
 std::unique_ptr<Pass> createCopyRemovalPass();
 
 /// Creates a pass to perform common sub expression elimination.
-std::unique_ptr<Pass> createCSEPass();
+std::unique_ptr<Pass>
+createCSEPass(std::function<bool(Operation *)> canSimplify = {});
 
 /// Creates a loop fusion pass which fuses loops. Buffers of size less than or
 /// equal to `localBufSizeThreshold` are promoted to memory space

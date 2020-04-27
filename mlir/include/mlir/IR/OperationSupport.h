@@ -160,7 +160,6 @@ public:
         T::getInterfaceMap(), T::hasTrait);
   }
 
-private:
   AbstractOperation(
       StringRef name, Dialect &dialect, OperationProperties opProperties,
       TypeID typeID,
@@ -179,6 +178,7 @@ private:
         opProperties(opProperties), interfaceMap(std::move(interfaceMap)),
         hasRawTrait(hasTrait) {}
 
+private:
   /// The properties of the operation.
   const OperationProperties opProperties;
 
@@ -293,7 +293,7 @@ public:
   using RepresentationUnion =
       PointerUnion<Identifier, const AbstractOperation *>;
 
-  OperationName(AbstractOperation *op) : representation(op) {}
+  OperationName(const AbstractOperation *op) : representation(op) {}
   OperationName(StringRef name, MLIRContext *context);
 
   /// Return the name of the dialect this operation is registered to.

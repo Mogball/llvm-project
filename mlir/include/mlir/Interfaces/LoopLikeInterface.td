@@ -44,6 +44,12 @@ def LoopLikeOpInterface : OpInterface<"LoopLikeOpInterface"> {
       }],
       "LogicalResult", "moveOutOfLoop", (ins "ArrayRef<Operation *>":$ops)
     >,
+    InterfaceMethod<[{
+      }],
+      "bool", "canBeHoisted", (ins "Operation *":$op), [{}], [{
+        return true;
+      }]
+    >,
   ];
 }
 

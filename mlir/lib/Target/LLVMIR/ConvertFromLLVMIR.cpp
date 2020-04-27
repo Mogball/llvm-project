@@ -449,7 +449,7 @@ static StringRef lookupOperationNameFromOpcode(unsigned opcode) {
       // FIXME: insertelement
       // FIXME: shufflevector
       // FIXME: extractvalue
-      // FIXME: insertvalue
+      INST(InsertValue, InsertValue),
       // FIXME: landingpad
   };
 #undef INST
@@ -744,6 +744,20 @@ LogicalResult Importer::processInstruction(llvm::Instruction *inst) {
     if (!type)
       return failure();
     v = b.create<GEPOp>(loc, type, ops);
+    return success();
+  }
+  case llvm::Instruction::InsertValue: {
+    llvm::InsertValueInst *insertValue = cast<llvm::InsertValueInst>(inst);
+    Value container = processValue(insertValue->getAggregateOperand());
+    if (!container)
+      return failure();
+    Value value = processValue(insertValue->getInsertedValueOperand());
+    if (!value)
+      return failure();
+    SmallVector<Attribute, 2> indices;
+    llvm::transform(insertValue->getIndices(), std::back_inserter(indices),
+                    [&](unsigned index) { return b.getI64IntegerAttr(index); });
+    v = b.create<InsertValueOp>(loc, container, value, b.getArrayAttr(indices));
     return success();
   }
   }

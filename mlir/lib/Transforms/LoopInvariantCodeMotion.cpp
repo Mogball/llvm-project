@@ -95,7 +95,8 @@ LogicalResult mlir::moveLoopInvariantCode(LoopLikeOpInterface looplike) {
   // rewriting. If the nested regions are loops, they will have been processed.
   for (auto &block : loopBody) {
     for (auto &op : block.without_terminator()) {
-      if (canBeHoisted(&op, isDefinedOutsideOfBody)) {
+      if (looplike.canBeHoisted(&op) &&
+          canBeHoisted(&op, isDefinedOutsideOfBody)) {
         opsToMove.push_back(&op);
         willBeMovedSet.insert(&op);
       }

@@ -173,7 +173,7 @@ public:
         getRegisteredInterface(InterfaceT::getInterfaceID()));
   }
 
-protected:
+public:
   /// The constructor takes a unique namespace for this dialect as well as the
   /// context to bind to.
   /// Note: The namespace must not contain '.' characters.
@@ -250,6 +250,7 @@ private:
   /// A collection of registered dialect interfaces.
   DenseMap<TypeID, std::unique_ptr<DialectInterface>> registeredInterfaces;
 
+public:
   /// Registers a specific dialect creation function with the global registry.
   /// Used through the registerDialect template.
   /// Registrations are deduplicated by dialect TypeID and only the first
@@ -257,6 +258,7 @@ private:
   static void
   registerDialectAllocator(TypeID typeID,
                            const DialectAllocatorFunction &function);
+
   template <typename ConcreteDialect>
   friend void registerDialect();
   friend class MLIRContext;

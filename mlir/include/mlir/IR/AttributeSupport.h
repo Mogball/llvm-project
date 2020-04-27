@@ -100,6 +100,7 @@ protected:
   AttributeStorage(Type type);
   AttributeStorage();
 
+public:
   /// Set the type of this attribute.
   void setType(Type type);
 

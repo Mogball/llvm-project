@@ -162,6 +162,8 @@ public:
         interfaces->lookup(T::getInterfaceID()));
   }
 
+  auto *getInterfaces() { return interfaces.get(); }
+
 private:
   /// This struct provides support for building a map of interfaces.
   class MapBuilder {

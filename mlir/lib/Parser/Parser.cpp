@@ -900,6 +900,11 @@ public:
 
   llvm::SMLoc getNameLoc() const override { return nameLoc; }
 
+  /// Re-encode the given source location as an MLIR location and return it.
+  Location getEncodedSourceLoc(llvm::SMLoc loc) override {
+    return parser.getEncodedSourceLocation(loc);
+  }
+
   //===--------------------------------------------------------------------===//
   // Token Parsing
   //===--------------------------------------------------------------------===//
@@ -949,9 +954,19 @@ public:
     return parser.parseToken(Token::less, "expected '<'");
   }
 
+  /// Parse a '<' token if present.
+  ParseResult parseOptionalLess() override {
+    return success(parser.consumeIf(Token::less));
+  }
+
   /// Parse a '>' token.
   ParseResult parseGreater() override {
     return parser.parseToken(Token::greater, "expected '>'");
+  }
+
+  /// Parse a '>' token if present.
+  ParseResult parseOptionalGreater() override {
+    return success(parser.consumeIf(Token::greater));
   }
 
   /// Parse a `(` token.
@@ -1442,6 +1457,8 @@ private:
 
 Operation *
 OperationParser::parseCustomOperation(ArrayRef<ResultRecord> resultIDs) {
+  static std::string barePrefixOrder[] = {"dmc", "std"};
+
   auto opLoc = getToken().getLoc();
   auto opName = getTokenSpelling();
 
@@ -1451,8 +1468,11 @@ OperationParser::parseCustomOperation(ArrayRef<ResultRecord> resultIDs) {
     // operation and prefix it with "std".
     // TODO: Would it be better to just build a mapping of the registered
     // operations in the standard dialect?
-    opDefinition =
-        AbstractOperation::lookup(Twine("std." + opName).str(), getContext());
+    for (auto it = std::begin(barePrefixOrder), e = std::end(barePrefixOrder);
+         it != e && !opDefinition; ++it) {
+      opDefinition =
+          AbstractOperation::lookup((*it + "." + opName).str(), getContext());
+    }
   }
 
   if (!opDefinition) {

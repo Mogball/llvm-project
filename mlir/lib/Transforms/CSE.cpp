@@ -54,6 +54,9 @@ struct CSE : public CSEBase<CSE> {
   using ScopedMapTy = llvm::ScopedHashTable<Operation *, Operation *,
                                             SimpleOperationInfo, AllocatorTy>;
 
+  explicit CSE(std::function<bool(Operation *)> canSimplify)
+      : canSimplify(std::move(canSimplify)) {}
+
   /// Represents a single entry in the depth first traversal of a CFG.
   struct CFGStackNode {
     CFGStackNode(ScopedMapTy &knownValues, DominanceInfoNode *node)
@@ -82,6 +85,8 @@ struct CSE : public CSEBase<CSE> {
   void runOnOperation() override;
 
 private:
+  std::function<bool(Operation *)> canSimplify;
+
   /// Operations marked as dead and to be erased.
   std::vector<Operation *> opsToErase;
 };
@@ -89,6 +94,9 @@ private:
 
 /// Attempt to eliminate a redundant operation.
 LogicalResult CSE::simplifyOperation(ScopedMapTy &knownValues, Operation *op) {
+  if (canSimplify && !canSimplify(op))
+    return failure();
+
   // Don't simplify terminator operations.
   if (op->isKnownTerminator())
     return failure();
@@ -233,4 +241,7 @@ void CSE::runOnOperation() {
   markAnalysesPreserved<DominanceInfo, PostDominanceInfo>();
 }
 
-std::unique_ptr<Pass> mlir::createCSEPass() { return std::make_unique<CSE>(); }
+std::unique_ptr<Pass>
+mlir::createCSEPass(std::function<bool(Operation *)> canSimplify) {
+  return std::make_unique<CSE>(std::move(canSimplify));
+}

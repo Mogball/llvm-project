@@ -420,6 +420,7 @@ protected:
     return base->getOperation();
   }
 
+public:
   /// Provide default implementations of trait hooks.  This allows traits to
   /// provide exactly the overrides they care about.
   static LogicalResult verifyTrait(Operation *op) { return success(); }
@@ -1352,6 +1353,7 @@ private:
     }
   };
 
+public:
   /// Returns true if this operation contains the trait for the given typeID.
   static bool hasTrait(TypeID traitID) {
     return llvm::is_contained(llvm::makeArrayRef({TypeID::get<Traits>()...}),
