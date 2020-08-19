@@ -14,9 +14,12 @@
 
 #include <cassert>
 #include <numeric>
+#include <iostream>
+#include <iomanip>
 
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "cuda.h"
@@ -31,6 +34,73 @@
       name = "<unknown>";                                                      \
     llvm::errs() << "'" << #expr << "' failed with '" << name << "'\n";        \
   }(expr)
+
+namespace {
+// Context object that buffers GPU modules, functions, temporary storage.
+struct Runtime {
+  // Load a module and cache it.
+  void loadModule(CUmodule *module, void *data) {
+    // Load the module during the first execution.
+    if(moduleList.count(data) == 0) {
+      CUDA_REPORT_IF_ERROR(cuModuleLoadData(module, data));
+      moduleList[data] = *module;
+    }
+    *module = moduleList[data];
+  }
+
+  // Get a function an cache it.
+  void getFunction(CUfunction *function, CUmodule module, const char *name) {
+    // Get the function during the first execution.
+    if(functionList.count(name) == 0) {
+      CUDA_REPORT_IF_ERROR(cuModuleGetFunction(function, module, name));
+      functionList[name] = *function;
+    }
+    *function = functionList[name];
+  }
+
+  // Get the default stream.
+  void createStream(CUstream *stream) {
+    if(streamList.empty()) {
+      CUstream stream;
+      CUDA_REPORT_IF_ERROR(cuStreamCreate(&stream, CU_STREAM_DEFAULT));
+      streamList.push_back(stream);
+    }
+    *stream = streamList.back();
+  }
+
+  // Allocate GPU device memory.
+  void allocMem(CUdeviceptr *ptr, size_t size) {
+    // Allocate storage if free list contains no matching allocation.
+    if(tempList.count(size) == 0 || tempList[size].empty()) {
+      CUDA_REPORT_IF_ERROR(cuMemAlloc(ptr, size));
+      return;
+    }
+    // Return existing allocation.
+    *ptr = tempList[size].back();
+    tempList[size].pop_back();
+  }
+
+  // Free GPU device memory.
+  void freeMem(CUdeviceptr ptr) {
+    CUdeviceptr allocPtr;
+    size_t allocSize = 0;
+    // Get the size of the allocation.
+    CUDA_REPORT_IF_ERROR(cuMemGetAddressRange(&allocPtr, &allocSize, ptr));
+    tempList[allocSize].push_back(ptr);
+  }
+
+  static Runtime &getInstance() {
+    thread_local Runtime runtime;
+    return runtime;
+  }
+
+private:
+  std::vector<CUstream> streamList;
+  llvm::DenseMap<void*, CUmodule> moduleList;
+  llvm::DenseMap<const char*, CUfunction> functionList;
+  llvm::DenseMap<size_t, std::vector<CUdeviceptr>> tempList;
+};
+} // anonymous namespace
 
 extern "C" CUmodule mgpuModuleLoad(void *data) {
   CUmodule module = nullptr;
@@ -52,19 +122,37 @@ extern "C" void mgpuLaunchKernel(CUfunction function, intptr_t gridX,
                                  intptr_t blockX, intptr_t blockY,
                                  intptr_t blockZ, int32_t smem, CUstream stream,
                                  void **params, void **extra) {
+  CUevent start, stop;
+  CUDA_REPORT_IF_ERROR(cuEventCreate(&start, CU_EVENT_DEFAULT));
+  CUDA_REPORT_IF_ERROR(cuEventCreate(&stop, CU_EVENT_DEFAULT));
+  
+  CUDA_REPORT_IF_ERROR(cuEventRecord(start, stream));
   CUDA_REPORT_IF_ERROR(cuLaunchKernel(function, gridX, gridY, gridZ, blockX,
                                       blockY, blockZ, smem, stream, params,
                                       extra));
+  CUDA_REPORT_IF_ERROR(cuEventRecord(stop, stream));
+  CUDA_REPORT_IF_ERROR(cuEventSynchronize(stop));
+  float duration = 0.0;
+  CUDA_REPORT_IF_ERROR(cuEventElapsedTime(&duration, start, stop));
+  std::cout << std::setprecision(5) << "-> kernel time [ms]: " << duration << "\n";
 }
 
 extern "C" CUstream mgpuStreamCreate() {
   CUstream stream = nullptr;
-  CUDA_REPORT_IF_ERROR(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING));
+  Runtime::getInstance().createStream(&stream);
   return stream;
 }
 
 extern "C" void mgpuStreamSynchronize(CUstream stream) {
   CUDA_REPORT_IF_ERROR(cuStreamSynchronize(stream));
+}
+
+extern "C" void mgpuMemAlloc(CUdeviceptr *ptr, uint64_t size) {
+  Runtime::getInstance().allocMem(ptr, size);
+}
+
+extern "C" void mgpuMemFree(CUdeviceptr ptr) {
+  Runtime::getInstance().freeMem(ptr);
 }
 
 /// Helper functions for writing mlir example code

@@ -14,9 +14,12 @@
 
 #include <cassert>
 #include <numeric>
+#include <iostream>
+#include <iomanip>
 
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "hip/hip_runtime.h"
@@ -31,16 +34,83 @@
     llvm::errs() << "'" << #expr << "' failed with '" << name << "'\n";        \
   }(expr)
 
+namespace {
+// Context object that buffers GPU modules, functions, temporary storage.
+struct Runtime {
+  // Load a module and cache it.
+  void loadModule(hipModule_t *module, void *data) {
+    // Load the module during the first execution.
+    if(moduleList.count(data) == 0) {
+      HIP_REPORT_IF_ERROR(hipModuleLoadData(module, data));
+      moduleList[data] = *module;
+    }
+    *module = moduleList[data];
+  }
+
+  // Get a function an cache it.
+  void getFunction(hipFunction_t *function, hipModule_t module, const char *name) {
+    // Get the function during the first execution.
+    if(functionList.count(name) == 0) {
+      HIP_REPORT_IF_ERROR(hipModuleGetFunction(function, module, name));
+      functionList[name] = *function;
+    }
+    *function = functionList[name];
+  }
+
+  // Get the default stream.
+  void createStream(hipStream_t *stream) {
+    if(streamList.empty()) {
+      hipStream_t stream;
+      HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));
+      streamList.push_back(stream);
+    }
+    *stream = streamList.back();
+  }
+
+  // Allocate GPU device memory.
+  void allocMem(hipDeviceptr_t *ptr, size_t size) {
+    // Allocate storage if free list contains no matching allocation.
+    if(tempList.count(size) == 0 || tempList[size].empty()) {
+      HIP_REPORT_IF_ERROR(hipMalloc(ptr, size));
+      return;
+    }
+    // Return existing allocation.
+    *ptr = tempList[size].back();
+    tempList[size].pop_back();
+  }
+
+  // Free GPU device memory.
+  void freeMem(hipDeviceptr_t ptr) {
+    hipDeviceptr_t allocPtr;
+    size_t allocSize = 0;
+    // Get the size of the allocation.
+    HIP_REPORT_IF_ERROR(hipMemGetAddressRange(&allocPtr, &allocSize, ptr));
+    tempList[allocSize].push_back(ptr);
+  }
+
+  static Runtime &getInstance() {
+    thread_local Runtime runtime;
+    return runtime;
+  }
+
+private:
+  std::vector<hipStream_t> streamList;
+  llvm::DenseMap<void*, hipModule_t> moduleList;
+  llvm::DenseMap<const char*, hipFunction_t> functionList;
+  llvm::DenseMap<size_t, std::vector<hipDeviceptr_t>> tempList;
+};
+} // anonymous namespace
+
 extern "C" hipModule_t mgpuModuleLoad(void *data) {
   hipModule_t module = nullptr;
-  HIP_REPORT_IF_ERROR(hipModuleLoadData(&module, data));
+  Runtime::getInstance().loadModule(&module, data);
   return module;
 }
 
 extern "C" hipFunction_t mgpuModuleGetFunction(hipModule_t module,
                                                const char *name) {
   hipFunction_t function = nullptr;
-  HIP_REPORT_IF_ERROR(hipModuleGetFunction(&function, module, name));
+  Runtime::getInstance().getFunction(&function, module, name);
   return function;
 }
 
@@ -53,19 +123,37 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
                                  intptr_t blockZ, int32_t smem,
                                  hipStream_t stream, void **params,
                                  void **extra) {
+  hipEvent_t start, stop;
+  HIP_REPORT_IF_ERROR(hipEventCreate(&start));
+  HIP_REPORT_IF_ERROR(hipEventCreate(&stop));
+  
+  HIP_REPORT_IF_ERROR(hipEventRecord(start, stream));
   HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ,
                                             blockX, blockY, blockZ, smem,
                                             stream, params, extra));
+  HIP_REPORT_IF_ERROR(hipEventRecord(stop, stream));
+  HIP_REPORT_IF_ERROR(hipEventSynchronize(stop));
+  float duration = 0.0;
+  HIP_REPORT_IF_ERROR(hipEventElapsedTime(&duration, start, stop));
+  std::cout << std::setprecision(5) << "-> kernel time [ms]: " << duration << "\n";
 }
 
 extern "C" void *mgpuStreamCreate() {
   hipStream_t stream = nullptr;
-  HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));
+  Runtime::getInstance().createStream(&stream);
   return stream;
 }
 
 extern "C" void mgpuStreamSynchronize(hipStream_t stream) {
   return HIP_REPORT_IF_ERROR(hipStreamSynchronize(stream));
+}
+
+extern "C" void mgpuMemAlloc(hipDeviceptr_t *ptr, uint64_t size) {
+  Runtime::getInstance().allocMem(ptr, size);
+}
+
+extern "C" void mgpuMemFree(hipDeviceptr_t ptr) {
+  Runtime::getInstance().freeMem(ptr);
 }
 
 /// Helper functions for writing mlir example code
