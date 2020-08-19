@@ -122,12 +122,14 @@ public:
 private:
   const std::unique_ptr<MLIRContextImpl> impl;
 
+public:
   /// Get a dialect for the provided namespace and TypeID: abort the program if
   /// a dialect exist for this namespace with different TypeID. Returns a
   /// pointer to the dialect owned by the context.
   Dialect *getOrCreateDialect(StringRef dialectNamespace, TypeID dialectID,
                               function_ref<std::unique_ptr<Dialect>()> ctor);
 
+private:
   MLIRContext(const MLIRContext &) = delete;
   void operator=(const MLIRContext &) = delete;
 };

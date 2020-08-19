@@ -230,10 +230,12 @@ private:
   /// The namespace of this dialect.
   StringRef name;
 
+public:
   /// The unique identifier of the derived Op class, this is used in the context
   /// to allow registering multiple times the same dialect.
   TypeID dialectID;
 
+private:
   /// This is the context that owns this Dialect object.
   MLIRContext *context;
 
