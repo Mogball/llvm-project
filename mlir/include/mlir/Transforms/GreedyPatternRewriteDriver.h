@@ -59,15 +59,22 @@ public:
 ///       These methods also perform folding and simple dead-code elimination
 ///       before attempting to match any of the provided patterns.
 ///
-/// You may configure several aspects of this with GreedyRewriteConfig.
-LogicalResult applyPatternsAndFoldGreedily(
-    MutableArrayRef<Region> regions, const FrozenRewritePatternSet &patterns,
-    GreedyRewriteConfig config = GreedyRewriteConfig());
+/// You may configure several aspects of this with GreedyRewriteConfig. A
+/// rewrite listener can be supplied to hook on to rewrite events, such as
+/// operations being removed or replaced.
+LogicalResult
+applyPatternsAndFoldGreedily(MutableArrayRef<Region> regions,
+                             const FrozenRewritePatternSet &patterns,
+                             GreedyRewriteConfig config = GreedyRewriteConfig(),
+                             RewriteListener *listener = nullptr);
 
-/// Rewrite the given regions, which must be isolated from above.
-inline LogicalResult applyPatternsAndFoldGreedily(
-    Operation *op, const FrozenRewritePatternSet &patterns,
-    GreedyRewriteConfig config = GreedyRewriteConfig()) {
+/// Rewrite the regions of the given operation, which must be isolated from
+/// above.
+inline LogicalResult
+applyPatternsAndFoldGreedily(Operation *op,
+                             const FrozenRewritePatternSet &patterns,
+                             GreedyRewriteConfig config = GreedyRewriteConfig(),
+                             RewriteListener *listener = nullptr) {
   return applyPatternsAndFoldGreedily(op->getRegions(), patterns, config);
 }
 

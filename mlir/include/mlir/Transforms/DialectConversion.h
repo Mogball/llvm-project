@@ -523,7 +523,8 @@ struct ConversionPatternRewriterImpl;
 /// This class implements a pattern rewriter for use with ConversionPatterns. It
 /// extends the base PatternRewriter and provides special conversion specific
 /// hooks.
-class ConversionPatternRewriter final : public PatternRewriter {
+class ConversionPatternRewriter final : public PatternRewriter,
+                                        public RewriteListener {
 public:
   explicit ConversionPatternRewriter(MLIRContext *ctx);
   ~ConversionPatternRewriter() override;
@@ -634,7 +635,7 @@ public:
   void cancelRootUpdate(Operation *op) override;
 
   /// PatternRewriter hook for notifying match failure reasons.
-  LogicalResult
+  void
   notifyMatchFailure(Operation *op,
                      function_ref<void(Diagnostic &)> reasonCallback) override;
   using PatternRewriter::notifyMatchFailure;

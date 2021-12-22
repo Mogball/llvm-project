@@ -685,7 +685,7 @@ private:
 /// This class serves as a common API for IR mutation between pattern rewrites
 /// and non-pattern rewrites, and facilitates the development of shared
 /// IR transformation utilities.
-class RewriterBase : public OpBuilder, public OpBuilder::Listener {
+class RewriterBase : public OpBuilder {
 public:
   /// Move the blocks that belong to "region" before the given position in
   /// another region "parent". The two regions must be different. The caller
@@ -801,11 +801,11 @@ public:
   std::enable_if_t<!std::is_convertible<CallbackT, Twine>::value, LogicalResult>
   notifyMatchFailure(Operation *op, CallbackT &&reasonCallback) {
 #ifndef NDEBUG
-    return notifyMatchFailure(op,
-                              function_ref<void(Diagnostic &)>(reasonCallback));
-#else
-    return failure();
+    if (RewriteListener *listener = getListener())
+      listener->notifyMatchFailure(
+          op, function_ref<void(Diagnostic &)>(reasonCallback));
 #endif
+    return failure();
   }
   LogicalResult notifyMatchFailure(Operation *op, const Twine &msg) {
     return notifyMatchFailure(op, [&](Diagnostic &diag) { diag << msg; });
@@ -815,35 +815,10 @@ public:
   }
 
 protected:
-  /// Initialize the builder with this rewriter as the listener.
-  explicit RewriterBase(MLIRContext *ctx) : OpBuilder(ctx, /*listener=*/this) {}
-  explicit RewriterBase(const OpBuilder &otherBuilder)
-      : OpBuilder(otherBuilder) {
-    setListener(this);
-  }
-  ~RewriterBase() override;
+  /// Inherit constructors.
+  using OpBuilder::OpBuilder;
 
-  /// These are the callback methods that subclasses can choose to implement if
-  /// they would like to be notified about certain types of mutations.
-
-  /// Notify the rewriter that the specified operation is about to be replaced
-  /// with another set of operations. This is called before the uses of the
-  /// operation have been changed.
-  virtual void notifyRootReplaced(Operation *op) {}
-
-  /// This is called on an operation that a rewrite is removing, right before
-  /// the operation is deleted. At this point, the operation has zero uses.
-  virtual void notifyOperationRemoved(Operation *op) {}
-
-  /// Notify the rewriter that the pattern failed to match the given operation,
-  /// and provide a callback to populate a diagnostic with the reason why the
-  /// failure occurred. This method allows for derived rewriters to optionally
-  /// hook into the reason why a rewrite failed, and display it to users.
-  virtual LogicalResult
-  notifyMatchFailure(Operation *op,
-                     function_ref<void(Diagnostic &)> reasonCallback) {
-    return failure();
-  }
+  virtual ~RewriterBase();
 
 private:
   void operator=(const RewriterBase &) = delete;
@@ -864,8 +839,7 @@ private:
 /// such as a `PatternRewriter`, is not available.
 class IRRewriter : public RewriterBase {
 public:
-  explicit IRRewriter(MLIRContext *ctx) : RewriterBase(ctx) {}
-  explicit IRRewriter(const OpBuilder &builder) : RewriterBase(builder) {}
+  using RewriterBase::RewriterBase;
 };
 
 //===----------------------------------------------------------------------===//

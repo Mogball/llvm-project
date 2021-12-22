@@ -390,12 +390,12 @@ def IfOp : SCF_Op<"if",
   ];
 
   let extraClassDeclaration = [{
-    OpBuilder getThenBodyBuilder(OpBuilder::Listener *listener = nullptr) {
+    OpBuilder getThenBodyBuilder(RewriteListener *listener = nullptr) {
       Block* body = getBody(0);
       return getResults().empty() ? OpBuilder::atBlockTerminator(body, listener)
                                   : OpBuilder::atBlockEnd(body, listener);
     }
-    OpBuilder getElseBodyBuilder(OpBuilder::Listener *listener = nullptr) {
+    OpBuilder getElseBodyBuilder(RewriteListener *listener = nullptr) {
       Block* body = getBody(1);
       return getResults().empty() ? OpBuilder::atBlockTerminator(body, listener)
                                   : OpBuilder::atBlockEnd(body, listener);
