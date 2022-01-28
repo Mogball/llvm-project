@@ -53,13 +53,16 @@ struct SimpleOperationInfo : public llvm::DenseMapInfo<Operation *> {
 
 namespace {
 /// Simple common sub-expression elimination.
-struct CSE : public CSEBase<CSE> {
+struct CSE {
   /// Shared implementation of operation elimination and scoped map definitions.
   using AllocatorTy = llvm::RecyclingAllocator<
       llvm::BumpPtrAllocator,
       llvm::ScopedHashTableVal<Operation *, Operation *>>;
   using ScopedMapTy = llvm::ScopedHashTable<Operation *, Operation *,
                                             SimpleOperationInfo, AllocatorTy>;
+
+  CSE(DominanceInfo *domInfo, RewriteListener *listener)
+      : domInfo(domInfo), listener(listener) {}
 
   /// Represents a single entry in the depth first traversal of a CFG.
   struct CFGStackNode {
@@ -83,13 +86,31 @@ struct CSE : public CSEBase<CSE> {
                                   bool hasSSADominance);
   void simplifyBlock(ScopedMapTy &knownValues, Block *bb, bool hasSSADominance);
   void simplifyRegion(ScopedMapTy &knownValues, Region &region);
+  /// Return the number of erased operations.
+  unsigned simplify(Operation *rootOp);
 
-  void runOnOperation() override;
+  /// Get the number of dead operations removed.
+  unsigned getNumDCE() { return numDCE; }
+  /// Get the number of redundant operations removed.
+  unsigned getNumCSE() { return numCSE; }
 
 private:
   /// Operations marked as dead and to be erased.
   std::vector<Operation *> opsToErase;
-  DominanceInfo *domInfo = nullptr;
+  /// The number of trivially dead operations found and removed.
+  unsigned numDCE = 0;
+  /// The number of redundant operations removed.
+  unsigned numCSE = 0;
+
+  /// The dominance info to use.
+  DominanceInfo *domInfo;
+  /// An optional listener to notify of replaced or erased operations.
+  RewriteListener *listener;
+};
+
+/// Common subexpression elimination pass.
+struct CSEPass : CSEBase<CSEPass> {
+  void runOnOperation() override;
 };
 } // namespace
 
@@ -127,6 +148,8 @@ LogicalResult CSE::simplifyOperation(ScopedMapTy &knownValues, Operation *op,
     if (hasSSADominance) {
       // If the region has SSA dominance, then we are guaranteed to have not
       // visited any use of the current operation.
+      if (listener)
+        listener->notifyRootReplaced(op);
       op->replaceAllUsesWith(existing);
       opsToErase.push_back(op);
     } else {
@@ -243,29 +266,53 @@ void CSE::simplifyRegion(ScopedMapTy &knownValues, Region &region) {
   }
 }
 
-void CSE::runOnOperation() {
+unsigned CSE::simplify(Operation *rootOp) {
   /// A scoped hash table of defining operations within a region.
   ScopedMapTy knownValues;
-
-  domInfo = &getAnalysis<DominanceInfo>();
-  Operation *rootOp = getOperation();
 
   for (auto &region : rootOp->getRegions())
     simplifyRegion(knownValues, region);
 
-  // If no operations were erased, then we mark all analyses as preserved.
-  if (opsToErase.empty())
-    return markAllAnalysesPreserved();
-
   /// Erase any operations that were marked as dead during simplification.
-  for (auto *op : opsToErase)
+  for (auto *op : opsToErase) {
+    if (listener)
+      listener->notifyOperationRemoved(op);
     op->erase();
-  opsToErase.clear();
+  }
+
+  return opsToErase.size();
+}
+
+void CSEPass::runOnOperation() {
+  CSE cse(&getAnalysis<DominanceInfo>(), /*listener=*/nullptr);
+  unsigned numOpsRemoved = cse.simplify(getOperation());
+  numDCE += cse.getNumDCE();
+  numCSE += cse.getNumCSE();
+
+  // If no operations were erased, then we mark all analyses as preserved.
+  if (numOpsRemoved == 0)
+    return markAllAnalysesPreserved();
 
   // We currently don't remove region operations, so mark dominance as
   // preserved.
   markAnalysesPreserved<DominanceInfo, PostDominanceInfo>();
-  domInfo = nullptr;
 }
 
-std::unique_ptr<Pass> mlir::createCSEPass() { return std::make_unique<CSE>(); }
+std::unique_ptr<Pass> mlir::createCSEPass() {
+  return std::make_unique<CSEPass>();
+}
+
+/// Run CSE on the provided operation
+LogicalResult mlir::eliminateCommonSubexpressions(Operation *op,
+                                                  DominanceInfo *domInfo,
+                                                  RewriteListener *listener) {
+  Optional<DominanceInfo> defaultDomInfo;
+  if (domInfo == nullptr) {
+    defaultDomInfo.emplace(op);
+    domInfo = &*defaultDomInfo;
+  }
+
+  CSE cse(domInfo, listener);
+  cse.simplify(op);
+  return success();
+}

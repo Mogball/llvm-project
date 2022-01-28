@@ -12,11 +12,28 @@
 //===----------------------------------------------------------------------===//
 
 #include "PassDetail.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 
 using namespace mlir;
+
+/// Initialize the patterns for a canonicalization pass. Collect
+/// canonicalization patterns from all currently loaded dialects and registered
+/// operations.
+static FrozenRewritePatternSet
+initializeCanonicalizer(MLIRContext *context,
+                        ArrayRef<std::string> disabledPatterns,
+                        ArrayRef<std::string> enabledPatterns) {
+  RewritePatternSet owningPatterns(context);
+  for (auto *dialect : context->getLoadedDialects())
+    dialect->getCanonicalizationPatterns(owningPatterns);
+  for (RegisteredOperationName op : context->getRegisteredOperations())
+    op.getCanonicalizationPatterns(owningPatterns, context);
+
+  return {std::move(owningPatterns), disabledPatterns, enabledPatterns};
+}
 
 namespace {
 /// Canonicalize operations in nested regions.
@@ -40,14 +57,8 @@ struct Canonicalizer : public CanonicalizerBase<Canonicalizer> {
   /// Initialize the canonicalizer by building the set of patterns used during
   /// execution.
   LogicalResult initialize(MLIRContext *context) override {
-    RewritePatternSet owningPatterns(context);
-    for (auto *dialect : context->getLoadedDialects())
-      dialect->getCanonicalizationPatterns(owningPatterns);
-    for (RegisteredOperationName op : context->getRegisteredOperations())
-      op.getCanonicalizationPatterns(owningPatterns, context);
-
-    patterns = FrozenRewritePatternSet(std::move(owningPatterns),
-                                       disabledPatterns, enabledPatterns);
+    patterns =
+        initializeCanonicalizer(context, disabledPatterns, enabledPatterns);
     return success();
   }
   void runOnOperation() override {
@@ -55,7 +66,9 @@ struct Canonicalizer : public CanonicalizerBase<Canonicalizer> {
                                        config);
   }
 
+  /// The greedy rewrite config to use when applying patterns.
   GreedyRewriteConfig config;
+  /// The canonicalization patterns.
   FrozenRewritePatternSet patterns;
 };
 } // namespace
@@ -72,4 +85,15 @@ mlir::createCanonicalizerPass(const GreedyRewriteConfig &config,
                               ArrayRef<std::string> enabledPatterns) {
   return std::make_unique<Canonicalizer>(config, disabledPatterns,
                                          enabledPatterns);
+}
+
+/// Run canonicalization on the provided operation.
+LogicalResult
+mlir::canonicalizeOperations(Operation *op, const GreedyRewriteConfig &config,
+                             ArrayRef<std::string> disabledPatterns,
+                             ArrayRef<std::string> enabledPatterns,
+                             RewriteListener *listener) {
+  FrozenRewritePatternSet patterns = initializeCanonicalizer(
+      op->getContext(), disabledPatterns, enabledPatterns);
+  return applyPatternsAndFoldGreedily(op, patterns, config, listener);
 }

@@ -23,7 +23,9 @@
 namespace mlir {
 
 class AffineForOp;
+class DominanceInfo;
 class GreedyRewriteConfig;
+struct RewriteListener;
 
 /// Fusion mode to attempt. The default mode `Greedy` does both
 /// producer-consumer and sibling fusion.
@@ -74,8 +76,24 @@ createCanonicalizerPass(const GreedyRewriteConfig &config,
                         ArrayRef<std::string> disabledPatterns = llvm::None,
                         ArrayRef<std::string> enabledPatterns = llvm::None);
 
+/// Canonicalize all operations nested under the provided operation, using the
+/// specified config, disabled and enabled patterns, and notify the provided
+/// listener of rewrite events.
+LogicalResult
+canonicalizeOperations(Operation *op, const GreedyRewriteConfig &config,
+                       ArrayRef<std::string> disabledPatterns = llvm::None,
+                       ArrayRef<std::string> enabledPatterns = llvm::None,
+                       RewriteListener *listener = nullptr);
+
 /// Creates a pass to perform common sub expression elimination.
 std::unique_ptr<Pass> createCSEPass();
+
+/// Perform common subexpression elimination on all operations nested within the
+/// provided operation. Optionally provide existing dominance info or a listener
+/// to be notified when operations are replaced or erased.
+LogicalResult
+eliminateCommonSubexpressions(Operation *op, DominanceInfo *domInfo = nullptr,
+                              RewriteListener *listener = nullptr);
 
 /// Creates a loop fusion pass which fuses loops according to type of fusion
 /// specified in `fusionMode`. Buffers of size less than or equal to
