@@ -44,6 +44,10 @@ class AffineMapAttr;
 class AffineMap;
 class UnitAttr;
 
+//===----------------------------------------------------------------------===//
+// Builder
+//===----------------------------------------------------------------------===//
+
 /// This class is a general helper class for creating context-global objects
 /// like types, attributes, and affine expressions.
 class Builder {
@@ -174,54 +178,138 @@ protected:
   MLIRContext *context;
 };
 
+//===----------------------------------------------------------------------===//
+// RewriteListener
+//===----------------------------------------------------------------------===//
+
+/// This class represents a listener that can be used to hook on to various
+/// rewrite events in an `OpBuilder` or `PatternRewriter`. The class is notified
+/// by when:
+///
+/// - an operation is removed
+/// - an operation is inserted
+/// - an operation is replaced
+/// - a block is created
+/// - a pattern match failed
+///
+/// Listeners can be used to track IR mutations throughout pattern rewrites.
+struct RewriteListener {
+  virtual ~RewriteListener();
+
+  /// These are the callback methods that subclasses can choose to implement if
+  /// they would like to be notified about certain types of mutations.
+
+  /// Notification handler for when an operation is inserted into the builder.
+  /// op` is the operation that was inserted.
+  virtual void notifyOperationInserted(Operation *op) {}
+
+  /// Notification handler for when a block is created using the builder.
+  /// `block` is the block that was created.
+  virtual void notifyBlockCreated(Block *block) {}
+
+  /// Notification handler for when the specified operation is about to be
+  /// replaced with another set of operations. This is called before the uses of
+  /// the operation have been changed.
+  virtual void notifyRootReplaced(Operation *op) {}
+
+  /// Notification handler for when an the specified operation is about to be
+  /// deleted. At this point, the operation has zero uses.
+  virtual void notifyOperationRemoved(Operation *op) {}
+
+  /// Notify the listener that a pattern failed to match the given operation,
+  /// and provide a callback to populate a diagnostic with the reason why the
+  /// failure occurred. This method allows for derived listeners to optionally
+  /// hook into the reason why a rewrite failed, and display it to users.
+  virtual void
+  notifyMatchFailure(Operation *op,
+                     function_ref<void(Diagnostic &)> reasonCallback) {}
+};
+
+//===----------------------------------------------------------------------===//
+// ListenerList
+//===----------------------------------------------------------------------===//
+
+/// This class contains multiple listeners to which rewrite events can be sent.
+class ListenerList : public RewriteListener {
+public:
+  /// Add a listener to the list.
+  void addListener(RewriteListener *listener) { listeners.push_back(listener); }
+
+  /// Send notification of an operation being inserted to all listeners.
+  void notifyOperationInserted(Operation *op) override;
+
+  /// Send notification of a block being created to all listeners.
+  void notifyBlockCreated(Block *block) override;
+
+  /// Send notification that an operation has been replaced to all listeners.
+  void notifyRootReplaced(Operation *op) override;
+
+  /// Send notification that an operation is about to be deleted to all
+  /// listeners.
+  void notifyOperationRemoved(Operation *op) override;
+
+  /// Notify all listeners that a pattern match failed.
+  void
+  notifyMatchFailure(Operation *op,
+                     function_ref<void(Diagnostic &)> reasonCallback) override;
+
+private:
+  /// The list of listeners to send events to.
+  SmallVector<RewriteListener *, 1> listeners;
+};
+
+//===----------------------------------------------------------------------===//
+// OpBuilder
+//===----------------------------------------------------------------------===//
+
 /// This class helps build Operations. Operations that are created are
 /// automatically inserted at an insertion point. The builder is copyable.
 class OpBuilder : public Builder {
 public:
-  struct Listener;
-
   /// Create a builder with the given context.
-  explicit OpBuilder(MLIRContext *ctx, Listener *listener = nullptr)
+  explicit OpBuilder(MLIRContext *ctx, RewriteListener *listener = nullptr)
       : Builder(ctx), listener(listener) {}
 
   /// Create a builder and set the insertion point to the start of the region.
-  explicit OpBuilder(Region *region, Listener *listener = nullptr)
+  explicit OpBuilder(Region *region, RewriteListener *listener = nullptr)
       : OpBuilder(region->getContext(), listener) {
     if (!region->empty())
       setInsertionPoint(&region->front(), region->front().begin());
   }
-  explicit OpBuilder(Region &region, Listener *listener = nullptr)
+  explicit OpBuilder(Region &region, RewriteListener *listener = nullptr)
       : OpBuilder(&region, listener) {}
 
   /// Create a builder and set insertion point to the given operation, which
   /// will cause subsequent insertions to go right before it.
-  explicit OpBuilder(Operation *op, Listener *listener = nullptr)
+  explicit OpBuilder(Operation *op, RewriteListener *listener = nullptr)
       : OpBuilder(op->getContext(), listener) {
     setInsertionPoint(op);
   }
 
   OpBuilder(Block *block, Block::iterator insertPoint,
-            Listener *listener = nullptr)
+            RewriteListener *listener = nullptr)
       : OpBuilder(block->getParent()->getContext(), listener) {
     setInsertionPoint(block, insertPoint);
   }
 
   /// Create a builder and set the insertion point to before the first operation
   /// in the block but still inside the block.
-  static OpBuilder atBlockBegin(Block *block, Listener *listener = nullptr) {
+  static OpBuilder atBlockBegin(Block *block,
+                                RewriteListener *listener = nullptr) {
     return OpBuilder(block, block->begin(), listener);
   }
 
   /// Create a builder and set the insertion point to after the last operation
   /// in the block but still inside the block.
-  static OpBuilder atBlockEnd(Block *block, Listener *listener = nullptr) {
+  static OpBuilder atBlockEnd(Block *block,
+                              RewriteListener *listener = nullptr) {
     return OpBuilder(block, block->end(), listener);
   }
 
   /// Create a builder and set the insertion point to before the block
   /// terminator.
   static OpBuilder atBlockTerminator(Block *block,
-                                     Listener *listener = nullptr) {
+                                     RewriteListener *listener = nullptr) {
     auto *terminator = block->getTerminator();
     assert(terminator != nullptr && "the block has no terminator");
     return OpBuilder(block, Block::iterator(terminator), listener);
@@ -231,26 +319,12 @@ public:
   // Listeners
   //===--------------------------------------------------------------------===//
 
-  /// This class represents a listener that may be used to hook into various
-  /// actions within an OpBuilder.
-  struct Listener {
-    virtual ~Listener();
-
-    /// Notification handler for when an operation is inserted into the builder.
-    /// `op` is the operation that was inserted.
-    virtual void notifyOperationInserted(Operation *op) {}
-
-    /// Notification handler for when a block is created using the builder.
-    /// `block` is the block that was created.
-    virtual void notifyBlockCreated(Block *block) {}
-  };
-
   /// Sets the listener of this builder to the one provided.
-  void setListener(Listener *newListener) { listener = newListener; }
+  void setListener(RewriteListener *newListener) { listener = newListener; }
 
   /// Returns the current listener of this builder, or nullptr if this builder
   /// doesn't have a listener.
-  Listener *getListener() const { return listener; }
+  RewriteListener *getListener() const { return listener; }
 
   //===--------------------------------------------------------------------===//
   // Insertion Point Management
@@ -509,7 +583,7 @@ private:
   /// before.
   Block::iterator insertPoint;
   /// The optional listener for events of this builder.
-  Listener *listener;
+  RewriteListener *listener;
 };
 
 } // namespace mlir

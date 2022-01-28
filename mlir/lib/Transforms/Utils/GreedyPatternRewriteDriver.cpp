@@ -32,11 +32,12 @@ using namespace mlir;
 namespace {
 /// This is a worklist-driven driver for the PatternMatcher, which repeatedly
 /// applies the locally optimal patterns in a roughly "bottom up" way.
-class GreedyPatternRewriteDriver : public PatternRewriter {
+class GreedyPatternRewriteDriver : public RewriteListener {
 public:
   explicit GreedyPatternRewriteDriver(MLIRContext *ctx,
                                       const FrozenRewritePatternSet &patterns,
-                                      const GreedyRewriteConfig &config);
+                                      const GreedyRewriteConfig &config,
+                                      RewriteListener *listener);
 
   /// Simplify the operations within the given regions.
   bool simplify(MutableArrayRef<Region> regions);
@@ -71,11 +72,8 @@ protected:
   // before the root is changed.
   void notifyRootReplaced(Operation *op) override;
 
-  /// PatternRewriter hook for erasing a dead operation.
-  void eraseOp(Operation *op) override;
-
   /// PatternRewriter hook for notifying match failure reasons.
-  LogicalResult
+  void
   notifyMatchFailure(Operation *op,
                      function_ref<void(Diagnostic &)> reasonCallback) override;
 
@@ -92,9 +90,16 @@ protected:
   /// Non-pattern based folder for operations.
   OperationFolder folder;
 
+  /// The pattern rewriter instance to use to perform rewrite operations.
+  PatternRewriter rewriter;
+
 private:
   /// Configuration information for how to simplify.
   GreedyRewriteConfig config;
+
+  /// The listeners attached to the pattern rewriter, including this and an
+  /// optional user-provided listener to notify of rewrite events.
+  ListenerList listeners;
 
 #ifndef NDEBUG
   /// A logger used to emit information during the application process.
@@ -105,8 +110,15 @@ private:
 
 GreedyPatternRewriteDriver::GreedyPatternRewriteDriver(
     MLIRContext *ctx, const FrozenRewritePatternSet &patterns,
-    const GreedyRewriteConfig &config)
-    : PatternRewriter(ctx), matcher(patterns), folder(ctx), config(config) {
+    const GreedyRewriteConfig &config, RewriteListener *listener)
+    : matcher(patterns), folder(ctx), rewriter(ctx, &listeners),
+      config(config) {
+  // Attach ourselves as a listener.
+  listeners.addListener(this);
+  // Attach the user-provided listener, if there is one.
+  if (listener)
+    listeners.addListener(listener);
+
   worklist.reserve(64);
 
   // Apply a simple cost model based solely on pattern benefit.
@@ -247,15 +259,14 @@ bool GreedyPatternRewriteDriver::simplify(MutableArrayRef<Region> regions) {
       };
 
       LogicalResult matchResult =
-          matcher.matchAndRewrite(op, *this, canApply, onFailure, onSuccess);
+          matcher.matchAndRewrite(op, rewriter, canApply, onFailure, onSuccess);
       if (succeeded(matchResult))
         LLVM_DEBUG(logResultWithLine("success", "pattern matched"));
       else
         LLVM_DEBUG(logResultWithLine("failure", "pattern failed to match"));
 #else
-      LogicalResult matchResult = matcher.matchAndRewrite(op, *this);
+      LogicalResult matchResult = matcher.matchAndRewrite(op, rewriter);
 #endif
-
 
 #ifndef NDEBUG
 #endif
@@ -266,7 +277,7 @@ bool GreedyPatternRewriteDriver::simplify(MutableArrayRef<Region> regions) {
     // After applying patterns, make sure that the CFG of each of the regions
     // is kept up to date.
     if (config.enableRegionSimplification)
-      changed |= succeeded(simplifyRegions(*this, regions));
+      changed |= succeeded(simplifyRegions(rewriter, regions));
   } while (changed &&
            (++iteration < config.maxIterations ||
             config.maxIterations == GreedyRewriteConfig::kNoIterationLimit));
@@ -327,6 +338,10 @@ void GreedyPatternRewriteDriver::addToWorklist(Operands &&operands) {
 }
 
 void GreedyPatternRewriteDriver::notifyOperationRemoved(Operation *op) {
+  LLVM_DEBUG({
+    logger.startLine() << "** Erase   : '" << op->getName() << "'(" << op
+                       << ")\n";
+  });
   addToWorklist(op->getOperands());
   op->walk([this](Operation *operation) {
     removeFromWorklist(operation);
@@ -344,22 +359,13 @@ void GreedyPatternRewriteDriver::notifyRootReplaced(Operation *op) {
       addToWorklist(user);
 }
 
-void GreedyPatternRewriteDriver::eraseOp(Operation *op) {
-  LLVM_DEBUG({
-    logger.startLine() << "** Erase   : '" << op->getName() << "'(" << op
-                       << ")\n";
-  });
-  PatternRewriter::eraseOp(op);
-}
-
-LogicalResult GreedyPatternRewriteDriver::notifyMatchFailure(
+void GreedyPatternRewriteDriver::notifyMatchFailure(
     Operation *op, function_ref<void(Diagnostic &)> reasonCallback) {
   LLVM_DEBUG({
     Diagnostic diag(op->getLoc(), DiagnosticSeverity::Remark);
     reasonCallback(diag);
     logger.startLine() << "** Failure : " << diag.str() << "\n";
   });
-  return failure();
 }
 
 /// Rewrite the regions of the specified operation, which must be isolated from
@@ -368,10 +374,9 @@ LogicalResult GreedyPatternRewriteDriver::notifyMatchFailure(
 /// in the result operation regions. Note: This does not apply patterns to the
 /// top-level operation itself.
 ///
-LogicalResult
-mlir::applyPatternsAndFoldGreedily(MutableArrayRef<Region> regions,
-                                   const FrozenRewritePatternSet &patterns,
-                                   GreedyRewriteConfig config) {
+LogicalResult mlir::applyPatternsAndFoldGreedily(
+    MutableArrayRef<Region> regions, const FrozenRewritePatternSet &patterns,
+    GreedyRewriteConfig config, RewriteListener *listener) {
   if (regions.empty())
     return success();
 
@@ -386,7 +391,8 @@ mlir::applyPatternsAndFoldGreedily(MutableArrayRef<Region> regions,
          "patterns can only be applied to operations IsolatedFromAbove");
 
   // Start the pattern driver.
-  GreedyPatternRewriteDriver driver(regions[0].getContext(), patterns, config);
+  GreedyPatternRewriteDriver driver(regions[0].getContext(), patterns, config,
+                                    listener);
   bool converged = driver.simplify(regions);
   LLVM_DEBUG(if (!converged) {
     llvm::dbgs() << "The pattern rewrite doesn't converge after scanning "
@@ -402,11 +408,11 @@ mlir::applyPatternsAndFoldGreedily(MutableArrayRef<Region> regions,
 namespace {
 /// This is a simple driver for the PatternMatcher to apply patterns and perform
 /// folding on a single op. It repeatedly applies locally optimal patterns.
-class OpPatternRewriteDriver : public PatternRewriter {
+class OpPatternRewriteDriver : public RewriteListener {
 public:
   explicit OpPatternRewriteDriver(MLIRContext *ctx,
                                   const FrozenRewritePatternSet &patterns)
-      : PatternRewriter(ctx), matcher(patterns), folder(ctx) {
+      : matcher(patterns), folder(ctx), rewriter(ctx, this) {
     // Apply a simple cost model based solely on pattern benefit.
     matcher.applyDefaultCostModel();
   }
@@ -431,6 +437,9 @@ private:
 
   /// Non-pattern based folder for operations.
   OperationFolder folder;
+
+  /// The pattern rewriter instance to use to perform rewrite operations.
+  PatternRewriter rewriter;
 
   /// Set to true if the operation has been erased via pattern rewrites.
   bool opErasedViaPatternRewrites = false;
@@ -476,7 +485,7 @@ LogicalResult OpPatternRewriteDriver::simplifyLocally(Operation *op,
 
     // Try to match one of the patterns. The rewriter is automatically
     // notified of any necessary changes, so there is nothing else to do here.
-    changed |= succeeded(matcher.matchAndRewrite(op, *this));
+    changed |= succeeded(matcher.matchAndRewrite(op, rewriter));
     if ((erased = opErasedViaPatternRewrites))
       return success();
   } while (changed &&
@@ -502,7 +511,8 @@ public:
   explicit MultiOpPatternRewriteDriver(MLIRContext *ctx,
                                        const FrozenRewritePatternSet &patterns,
                                        bool strict)
-      : GreedyPatternRewriteDriver(ctx, patterns, GreedyRewriteConfig()),
+      : GreedyPatternRewriteDriver(ctx, patterns, GreedyRewriteConfig(),
+                                   /*listener=*/nullptr),
         strictMode(strict) {}
 
   bool simplifyLocally(ArrayRef<Operation *> op);
@@ -631,7 +641,7 @@ bool MultiOpPatternRewriteDriver::simplifyLocally(ArrayRef<Operation *> ops) {
     // Try to match one of the patterns. The rewriter is automatically
     // notified of any necessary changes, so there is nothing else to do
     // here.
-    changed |= succeeded(matcher.matchAndRewrite(op, *this));
+    changed |= succeeded(matcher.matchAndRewrite(op, rewriter));
   }
 
   return changed;

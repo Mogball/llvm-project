@@ -1490,7 +1490,7 @@ LogicalResult ConversionPatternRewriterImpl::notifyMatchFailure(
 //===----------------------------------------------------------------------===//
 
 ConversionPatternRewriter::ConversionPatternRewriter(MLIRContext *ctx)
-    : PatternRewriter(ctx),
+    : PatternRewriter(ctx, /*listener=*/this),
       impl(new detail::ConversionPatternRewriterImpl(*this)) {}
 ConversionPatternRewriter::~ConversionPatternRewriter() {}
 
@@ -1669,9 +1669,9 @@ void ConversionPatternRewriter::cancelRootUpdate(Operation *op) {
   rootUpdates.erase(rootUpdates.begin() + updateIdx);
 }
 
-LogicalResult ConversionPatternRewriter::notifyMatchFailure(
+void ConversionPatternRewriter::notifyMatchFailure(
     Operation *op, function_ref<void(Diagnostic &)> reasonCallback) {
-  return impl->notifyMatchFailure(op->getLoc(), reasonCallback);
+  (void)impl->notifyMatchFailure(op->getLoc(), reasonCallback);
 }
 
 detail::ConversionPatternRewriterImpl &ConversionPatternRewriter::getImpl() {

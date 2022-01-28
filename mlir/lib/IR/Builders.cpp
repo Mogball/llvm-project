@@ -339,10 +339,44 @@ AffineMap Builder::getShiftedAffineMap(AffineMap map, int64_t shift) {
 }
 
 //===----------------------------------------------------------------------===//
-// OpBuilder
+// RewriteListener
 //===----------------------------------------------------------------------===//
 
-OpBuilder::Listener::~Listener() {}
+RewriteListener::~RewriteListener() {}
+
+//===----------------------------------------------------------------------===//
+// ListenerList
+//===----------------------------------------------------------------------===//
+
+void ListenerList::notifyOperationInserted(Operation *op) {
+  for (RewriteListener *listener : listeners)
+    listener->notifyOperationInserted(op);
+}
+
+void ListenerList::notifyBlockCreated(Block *block) {
+  for (RewriteListener *listener : listeners)
+    listener->notifyBlockCreated(block);
+}
+
+void ListenerList::notifyRootReplaced(Operation *op) {
+  for (RewriteListener *listener : listeners)
+    listener->notifyRootReplaced(op);
+}
+
+void ListenerList::notifyOperationRemoved(Operation *op) {
+  for (RewriteListener *listener : listeners)
+    listener->notifyOperationRemoved(op);
+}
+
+void ListenerList::notifyMatchFailure(
+    Operation *op, function_ref<void(Diagnostic &)> reasonCallback) {
+  for (RewriteListener *listener : listeners)
+    listener->notifyMatchFailure(op, reasonCallback);
+}
+
+//===----------------------------------------------------------------------===//
+// OpBuilder
+//===----------------------------------------------------------------------===//
 
 /// Insert the given operation at the current insertion point and return it.
 Operation *OpBuilder::insert(Operation *op) {
