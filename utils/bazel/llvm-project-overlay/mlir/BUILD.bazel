@@ -4562,6 +4562,7 @@ cc_library(
         ":PDLToPDLInterp",
         ":Pass",
         ":SideEffectInterfaces",
+        ":Support",
         "//llvm:Support",
     ],
 )
@@ -5645,6 +5646,7 @@ cc_library(
         ":IR",
         ":Parser",
         ":Pass",
+        ":Rewrite",
         ":SCFTransforms",
         ":ShapeToStandard",
         ":ShapeTransforms",

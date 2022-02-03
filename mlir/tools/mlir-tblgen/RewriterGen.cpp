@@ -960,7 +960,8 @@ void PatternEmitter::emit(StringRef rewriteName) {
   llvm::interleaveComma(sortedResultOps, os, [&](const Operator *op) {
     os << '"' << op->getOperationName() << '"';
   });
-  os << "}) {}\n";
+  os << formatv("}) {\n    addDebugLabels(\"defined at {0}\");\n  }\n",
+                locs[0]);
 
   // Emit matchAndRewrite() function.
   {

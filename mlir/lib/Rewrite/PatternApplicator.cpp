@@ -13,6 +13,7 @@
 
 #include "mlir/Rewrite/PatternApplicator.h"
 #include "ByteCode.h"
+#include "mlir/Rewrite/PatternDebugger.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "pattern-application"
@@ -198,7 +199,13 @@ LogicalResult PatternApplicator::matchAndRewrite(
 
       LLVM_DEBUG(llvm::dbgs()
                  << "Trying to match \"" << pattern->getDebugName() << "\"\n");
-      result = pattern->matchAndRewrite(op, rewriter);
+      if (op->getContext()
+              ->getDebugActionManager()
+              .shouldExecute<PatternDebuggerAction>(pattern, op)) {
+        result = pattern->matchAndRewrite(op, rewriter);
+      } else {
+        result = failure();
+      }
       LLVM_DEBUG(llvm::dbgs() << "\"" << pattern->getDebugName() << "\" result "
                               << succeeded(result) << "\n");
 

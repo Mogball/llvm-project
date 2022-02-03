@@ -22,6 +22,7 @@
 #include "mlir/Parser.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Rewrite/PatternDebugger.h"
 #include "mlir/Support/DebugCounter.h"
 #include "mlir/Support/FileUtilities.h"
 #include "mlir/Support/Timing.h"
@@ -37,6 +38,12 @@
 
 using namespace mlir;
 using namespace llvm;
+
+static cl::opt<bool> debugPatterns(
+    "debug-patterns",
+    cl::desc("Enable the pattern debugger (user-controlled pattern "
+             "application)"),
+    cl::init(false));
 
 /// Perform the actions on the input file indicated by the command line flags
 /// within the specified context.
@@ -111,6 +118,11 @@ processBuffer(raw_ostream &os, std::unique_ptr<MemoryBuffer> ownedBuffer,
   if (verifyDiagnostics)
     context.printOpOnDiagnostic(false);
   context.getDebugActionManager().registerActionHandler<DebugCounter>();
+
+  if (debugPatterns) {
+    context.getDebugActionManager()
+        .registerActionHandler<PatternDebuggerHandler>();
+  }
 
   // If we are in verify diagnostics mode then we have a lot of work to do,
   // otherwise just perform the actions without worrying about it.
