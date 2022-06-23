@@ -84,11 +84,10 @@ private:
 ///
 template <typename ValueT> class Lattice : public AbstractLattice {
 public:
-  using AbstractLattice::AbstractLattice;
-
-  /// Get a lattice element with a known value.
-  Lattice(const ValueT &knownValue = ValueT())
-      : AbstractLattice(Value()), knownValue(knownValue) {}
+  /// Construct a lattice with a known value.
+  explicit Lattice(Value value)
+      : AbstractLattice(value),
+        knownValue(ValueT::getPessimisticValueState(value)) {}
 
   /// Return the value held by this lattice. This requires that the value is
   /// initialized.
@@ -245,6 +244,9 @@ private:
 /// This lattice value represents a known constant value of a lattice.
 class ConstantValue {
 public:
+  /// The pessimistic value state of the constant value is unknown.
+  static ConstantValue getPessimisticValueState(Value value) { return {}; }
+
   /// Construct a constant value with a known constant.
   ConstantValue(Attribute knownValue = {}, Dialect *dialect = nullptr)
       : constant(knownValue), dialect(dialect) {}

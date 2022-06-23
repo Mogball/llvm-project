@@ -5,6 +5,7 @@ add_mlir_library(MLIRTestAnalysis
   TestDataFlow.cpp
   TestDataFlowFramework.cpp
   TestDeadCodeAnalysis.cpp
+  TestDenseDataFlowAnalysis.cpp
   TestLiveness.cpp
   TestMatchReduction.cpp
   TestMemRefBoundCheck.cpp
