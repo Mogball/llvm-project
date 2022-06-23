@@ -2,7 +2,7 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-load("//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("//mlir:tblgen.bzl", "gentbl_cc_library", "gentbl_sharded_ops", "td_library")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -55,14 +55,6 @@ gentbl_cc_library(
     name = "TestOpsIncGen",
     strip_include_prefix = "lib/Dialect/Test",
     tbl_outs = [
-        (
-            ["-gen-op-decls"],
-            "lib/Dialect/Test/TestOps.h.inc",
-        ),
-        (
-            ["-gen-op-defs"],
-            "lib/Dialect/Test/TestOps.cpp.inc",
-        ),
         (
             [
                 "-gen-dialect-decls",
@@ -238,9 +230,22 @@ cc_library(
     ],
 )
 
+gentbl_sharded_ops(
+    name = "TestDialectOpSrcs",
+    hdr_out = "lib/Dialect/Test/TestOps.h.inc",
+    shard_count = 20,
+    sharder = "//mlir:mlir-src-sharder",
+    src_file = "lib/Dialect/Test/TestOps.cpp",
+    src_out = "lib/Dialect/Test/TestOps.cpp.inc",
+    tblgen = "//mlir:mlir-tblgen",
+    td_file = "lib/Dialect/Test/TestOps.td",
+    test = True,
+    deps = [":TestOpTdFiles"],
+)
+
 cc_library(
     name = "TestDialect",
-    srcs = glob(["lib/Dialect/Test/*.cpp"]),
+    srcs = glob(["lib/Dialect/Test/*.cpp"]) + [":TestDialectOpSrcs"],
     hdrs = glob(["lib/Dialect/Test/*.h"]),
     includes = [
         "lib/Dialect/Test",

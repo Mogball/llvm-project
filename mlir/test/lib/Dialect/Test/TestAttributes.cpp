@@ -14,15 +14,8 @@
 #include "TestAttributes.h"
 #include "TestDialect.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/DialectImplementation.h"
-#include "mlir/IR/ExtensibleDialect.h"
-#include "mlir/IR/Types.h"
-#include "mlir/Support/LogicalResult.h"
-#include "llvm/ADT/Hashing.h"
-#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
-#include "llvm/ADT/bit.h"
-#include "llvm/Support/ErrorHandling.h"
 
 using namespace mlir;
 using namespace test;
@@ -199,7 +192,8 @@ SubElementAttrInterface TestSubElementsAccessAttr::replaceImmediateSubAttribute(
 //===----------------------------------------------------------------------===//
 
 #include "TestAttrInterfaces.cpp.inc"
-
+#include "TestOpEnums.cpp.inc"
+#include "TestOpStructs.cpp.inc"
 #define GET_ATTRDEF_CLASSES
 #include "TestAttrDefs.cpp.inc"
 

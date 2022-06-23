@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "TestDialect.h"
-#include "TestTypes.h"
+#include "TestOps.h"
 #include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
