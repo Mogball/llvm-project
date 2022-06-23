@@ -19,6 +19,7 @@ add_mlir_library(MLIRAnalysis
   DataFlowAnalysis.cpp
   DataFlowFramework.cpp
   DataLayoutAnalysis.cpp
+  DenseDataFlowAnalysis.cpp
   IntRangeAnalysis.cpp
   Liveness.cpp
   SliceAnalysis.cpp
