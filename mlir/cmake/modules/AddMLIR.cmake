@@ -9,7 +9,7 @@ function(mlir_tablegen ofn)
   tablegen(MLIR ${ARGV})
   set(TABLEGEN_OUTPUT ${TABLEGEN_OUTPUT} ${CMAKE_CURRENT_BINARY_DIR}/${ofn}
       PARENT_SCOPE)
-      
+
   # Get the current set of include paths for this td file.
   cmake_parse_arguments(ARG "" "" "DEPENDS;EXTRA_INCLUDES" ${ARGN})
   get_directory_property(tblgen_includes INCLUDE_DIRECTORIES)
@@ -66,7 +66,7 @@ function(add_mlir_pdll_library target inputFile ofn)
       "  filepath: \"${LLVM_TARGET_DEFINITIONS_ABSOLUTE}\"\n"
       "  includes: \"${CMAKE_CURRENT_SOURCE_DIR};${tblgen_includes}\"\n"
   )
-  
+
   add_public_tablegen_target(${target})
 endfunction()
 
@@ -81,6 +81,22 @@ function(add_mlir_dialect dialect dialect_namespace)
   mlir_tablegen(${dialect}Dialect.cpp.inc -gen-dialect-defs -dialect=${dialect_namespace})
   add_public_tablegen_target(MLIR${dialect}IncGen)
   add_dependencies(mlir-headers MLIR${dialect}IncGen)
+endfunction()
+
+# Declare sharded dialect operation declarations and definitions
+function(add_sharded_ops ops_target shard_count)
+  set(LLVM_TARGET_DEFINITIONS ${ops_target}.td)
+  mlir_tablegen(${ops_target}.h.inc -gen-op-decls -op-shard-count=${shard_count})
+  mlir_tablegen(${ops_target}.cpp.inc -gen-op-defs -op-shard-count=${shard_count})
+  set(LLVM_TARGET_DEFINITIONS ${ops_target}.cpp)
+  foreach(index RANGE ${shard_count})
+    set(SHARDED_SRC ${ops_target}.${index}.cpp)
+    list(APPEND SHARDED_SRCS ${SHARDED_SRC})
+    tablegen(MLIR_SRC_SHARDER ${SHARDED_SRC} -op-shard-index=${index})
+    set(TABLEGEN_OUTPUT ${TABLEGEN_OUTPUT} ${CMAKE_CURRENT_BINARY_DIR}/${SHARDED_SRC})
+  endforeach()
+  add_public_tablegen_target(MLIR${ops_target}ShardGen)
+  set(SHARDED_SRCS ${SHARDED_SRCS} PARENT_SCOPE)
 endfunction()
 
 # Declare a dialect in the include directory

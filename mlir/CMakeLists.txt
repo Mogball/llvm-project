@@ -154,6 +154,7 @@ include_directories( ${MLIR_INCLUDE_DIR})
 add_subdirectory(tools/mlir-tblgen)
 add_subdirectory(tools/mlir-linalg-ods-gen)
 add_subdirectory(tools/mlir-pdll)
+add_subdirectory(tools/mlir-src-sharder)
 
 add_subdirectory(include/mlir)
 add_subdirectory(lib)
