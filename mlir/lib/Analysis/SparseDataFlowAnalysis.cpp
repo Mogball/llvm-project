@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Analysis/SparseDataFlowAnalysis.h"
+#include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "dataflow"
 
@@ -75,6 +76,23 @@ void PredecessorState::print(raw_ostream &os) const {
   os << "predecessors:\n";
   for (Operation *op : getKnownPredecessors())
     os << "  " << *op << "\n";
+}
+
+ChangeResult PredecessorState::join(Operation *predecessor) {
+  return knownPredecessors.insert(predecessor) ? ChangeResult::Change
+                                               : ChangeResult::NoChange;
+}
+
+ChangeResult PredecessorState::join(Operation *predecessor, ValueRange inputs) {
+  ChangeResult result = join(predecessor);
+  if (!inputs.empty()) {
+    ValueRange &curInputs = successorInputs[predecessor];
+    if (curInputs != inputs) {
+      curInputs = inputs;
+      result |= ChangeResult::Change;
+    }
+  }
+  return result;
 }
 
 //===----------------------------------------------------------------------===//
@@ -352,14 +370,18 @@ void DeadCodeAnalysis::visitRegionBranchOperation(
   branch.getSuccessorRegions(/*index=*/{}, *operands, successors);
 
   for (const RegionSuccessor &successor : successors) {
+    // The successor can be either an entry block or the parent operation.
+    ProgramPoint point = successor.getSuccessor()
+                             ? &successor.getSuccessor()->front()
+                             : ProgramPoint(branch);
     // Mark the entry block as executable.
-    Region *region = successor.getSuccessor();
-    assert(region && "expected a region successor");
-    auto *state = getOrCreate<Executable>(&region->front());
+    auto *state = getOrCreate<Executable>(point);
     propagateIfChanged(state, state->setToLive());
     // Add the parent op as a predecessor.
-    auto *predecessors = getOrCreate<PredecessorState>(&region->front());
-    propagateIfChanged(predecessors, predecessors->join(branch));
+    auto *predecessors = getOrCreate<PredecessorState>(point);
+    propagateIfChanged(
+        predecessors,
+        predecessors->join(branch, successor.getSuccessorInputs()));
   }
 }
 
@@ -385,7 +407,8 @@ void DeadCodeAnalysis::visitRegionTerminator(Operation *op,
       // Add this terminator as a predecessor to the parent op.
       predecessors = getOrCreate<PredecessorState>(branch);
     }
-    propagateIfChanged(predecessors, predecessors->join(op));
+    propagateIfChanged(predecessors,
+                       predecessors->join(op, successor.getSuccessorInputs()));
   }
 }
 
@@ -408,6 +431,339 @@ void DeadCodeAnalysis::visitCallableTerminator(Operation *op,
       // can't resolve the predecessor.
       propagateIfChanged(predecessors,
                          predecessors->setHasUnknownPredecessors());
+    }
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// AbstractSparseDataFlowAnalysis
+//===----------------------------------------------------------------------===//
+
+AbstractSparseDataFlowAnalysis::AbstractSparseDataFlowAnalysis(
+    DataFlowSolver &solver)
+    : DataFlowAnalysis(solver) {
+  registerPointKind<CFGEdge>();
+}
+
+LogicalResult AbstractSparseDataFlowAnalysis::initialize(Operation *top) {
+  // Mark the entry block arguments as having reached their pessimistic
+  // fixpoints.
+  for (Region &region : top->getRegions()) {
+    if (region.empty())
+      continue;
+    for (Value argument : region.front().getArguments())
+      markPessimisticFixpoint(getLatticeElement(argument));
+  }
+
+  return initializeRecursively(top);
+}
+
+LogicalResult
+AbstractSparseDataFlowAnalysis::initializeRecursively(Operation *op) {
+  // Initialize the analysis by visiting every owner of an SSA value (all
+  // operations and blocks).
+  visitOperation(op);
+  for (Region &region : op->getRegions()) {
+    for (Block &block : region) {
+      getOrCreate<Executable>(&block)->blockContentSubscribe(this);
+      visitBlock(&block);
+      for (Operation &op : block)
+        if (failed(initializeRecursively(&op)))
+          return failure();
+    }
+  }
+
+  return success();
+}
+
+LogicalResult AbstractSparseDataFlowAnalysis::visit(ProgramPoint point) {
+  if (Operation *op = point.dyn_cast<Operation *>())
+    visitOperation(op);
+  else if (Block *block = point.dyn_cast<Block *>())
+    visitBlock(block);
+  else
+    return failure();
+  return success();
+}
+
+void AbstractSparseDataFlowAnalysis::visitOperation(Operation *op) {
+  // Exit early on operations with no results.
+  if (op->getNumResults() == 0)
+    return;
+
+  // If the containing block is not executable, bail out.
+  if (!getOrCreate<Executable>(op->getBlock())->isLive())
+    return;
+
+  // Get the result lattices.
+  SmallVector<AbstractSparseLattice *> resultLattices;
+  resultLattices.reserve(op->getNumResults());
+  // Track whether all results have reached their fixpoint.
+  bool allAtFixpoint = true;
+  for (Value result : op->getResults()) {
+    AbstractSparseLattice *resultLattice = getLatticeElement(result);
+    allAtFixpoint &= resultLattice->isAtFixpoint();
+    resultLattices.push_back(resultLattice);
+  }
+  // If all result lattices have reached a fixpoint, there is nothing to do.
+  if (allAtFixpoint)
+    return;
+
+  // The results of a region branch operation are determined by control-flow.
+  if (auto branch = dyn_cast<RegionBranchOpInterface>(op)) {
+    return visitRegionSuccessors({branch}, branch,
+                                 /*successorIndex=*/llvm::None, resultLattices);
+  }
+
+  // The results of a call operation are determined by the callgraph.
+  if (auto call = dyn_cast<CallOpInterface>(op)) {
+    const auto *predecessors = getOrCreateFor<PredecessorState>(op, call);
+    // If not all return sites are known, then conservatively assume we can't
+    // reason about the data-flow.
+    if (!predecessors->allPredecessorsKnown())
+      return markAllPessimisticFixpoint(resultLattices);
+    for (Operation *predecessor : predecessors->getKnownPredecessors())
+      for (auto it : llvm::zip(predecessor->getOperands(), resultLattices))
+        join(std::get<1>(it), *getLatticeElementFor(op, std::get<0>(it)));
+    return;
+  }
+
+  // Grab the lattice elements of the operands.
+  SmallVector<const AbstractSparseLattice *> operandLattices;
+  operandLattices.reserve(op->getNumOperands());
+  for (Value operand : op->getOperands()) {
+    AbstractSparseLattice *operandLattice = getLatticeElement(operand);
+    operandLattice->useDefSubscribe(this);
+    // If any of the operand states are not initialized, bail out.
+    if (operandLattice->isUninitialized())
+      return;
+    operandLattices.push_back(operandLattice);
+  }
+
+  // Invoke the operation transfer function.
+  visitOperationImpl(op, operandLattices, resultLattices);
+}
+
+void AbstractSparseDataFlowAnalysis::visitBlock(Block *block) {
+  // Exit early on blocks with no arguments.
+  if (block->getNumArguments() == 0)
+    return;
+
+  // If the block is not executable, bail out.
+  if (!getOrCreate<Executable>(block)->isLive())
+    return;
+
+  // Get the argument lattices.
+  SmallVector<AbstractSparseLattice *> argLattices;
+  argLattices.reserve(block->getNumArguments());
+  bool allAtFixpoint = true;
+  for (BlockArgument argument : block->getArguments()) {
+    AbstractSparseLattice *argLattice = getLatticeElement(argument);
+    allAtFixpoint &= argLattice->isAtFixpoint();
+    argLattices.push_back(argLattice);
+  }
+  // If all argument lattices have reached their fixpoints, then there is
+  // nothing to do.
+  if (allAtFixpoint)
+    return;
+
+  // The argument lattices of entry blocks are set by region control-flow or the
+  // callgraph.
+  if (block->isEntryBlock()) {
+    // Check if this block is the entry block of a callable region.
+    auto callable = dyn_cast<CallableOpInterface>(block->getParentOp());
+    if (callable && callable.getCallableRegion() == block->getParent()) {
+      const auto *callsites = getOrCreateFor<PredecessorState>(block, callable);
+      // If not all callsites are known, conservatively mark all lattices as
+      // having reached their pessimistic fixpoints.
+      if (!callsites->allPredecessorsKnown())
+        return markAllPessimisticFixpoint(argLattices);
+      for (Operation *callsite : callsites->getKnownPredecessors()) {
+        auto call = cast<CallOpInterface>(callsite);
+        for (auto it : llvm::zip(call.getArgOperands(), argLattices))
+          join(std::get<1>(it), *getLatticeElementFor(block, std::get<0>(it)));
+      }
+      return;
+    }
+
+    // Check if the lattices can be determined from region control flow.
+    if (auto branch = dyn_cast<RegionBranchOpInterface>(block->getParentOp())) {
+      return visitRegionSuccessors(
+          block, branch, block->getParent()->getRegionNumber(), argLattices);
+    }
+
+    // Otherwise, we can't reason about the data-flow.
+    return markAllPessimisticFixpoint(argLattices);
+  }
+
+  // Iterate over the predecessors of the non-entry block.
+  for (Block::pred_iterator it = block->pred_begin(), e = block->pred_end();
+       it != e; ++it) {
+    Block *predecessor = *it;
+
+    // If the edge from the predecessor block to the current block is not live,
+    // bail out.
+    auto *edgeExecutable =
+        getOrCreate<Executable>(getProgramPoint<CFGEdge>(predecessor, block));
+    edgeExecutable->blockContentSubscribe(this);
+    if (!edgeExecutable->isLive())
+      continue;
+
+    // Check if we can reason about the data-flow from the predecessor.
+    if (auto branch =
+            dyn_cast<BranchOpInterface>(predecessor->getTerminator())) {
+      SuccessorOperands operands =
+          branch.getSuccessorOperands(it.getSuccessorIndex());
+      for (auto &it : llvm::enumerate(argLattices)) {
+        if (Value operand = operands[it.index()]) {
+          join(it.value(), *getLatticeElementFor(block, operand));
+        } else {
+          // Conservatively mark internally produced arguments as having reached
+          // their pessimistic fixpoint.
+          markPessimisticFixpoint(it.value());
+        }
+      }
+    } else {
+      return markAllPessimisticFixpoint(argLattices);
+    }
+  }
+}
+
+void AbstractSparseDataFlowAnalysis::visitRegionSuccessors(
+    ProgramPoint point, RegionBranchOpInterface branch,
+    Optional<unsigned> successorIndex,
+    ArrayRef<AbstractSparseLattice *> lattices) {
+  const auto *predecessors = getOrCreateFor<PredecessorState>(point, point);
+  assert(predecessors->allPredecessorsKnown() &&
+         "unexpected unresolved region successors");
+
+  for (Operation *op : predecessors->getKnownPredecessors()) {
+    // Get the incoming successor operands.
+    Optional<OperandRange> operands;
+
+    // Check if the predecessor is the parent op.
+    if (op == branch) {
+      operands = branch.getSuccessorEntryOperands(successorIndex);
+      // Otherwise, try to deduce the operands from a region return-like op.
+    } else {
+      assert(op->hasTrait<OpTrait::IsTerminator>() && "expected a terminator");
+      if (isRegionReturnLike(op))
+        operands = getRegionBranchSuccessorOperands(op, successorIndex);
+    }
+
+    if (!operands) {
+      // We can't reason about the data-flow.
+      return markAllPessimisticFixpoint(lattices);
+    }
+
+    ValueRange inputs = predecessors->getSuccessorInputs(op);
+    assert(inputs.size() == operands->size() &&
+           "expected the same number of successor inputs as operands");
+
+    // TODO: This was updated to be exposed upstream.
+    unsigned firstIndex = 0;
+    if (inputs.size() != lattices.size()) {
+      if (inputs.empty()) {
+        markAllPessimisticFixpoint(lattices);
+        return;
+      }
+      firstIndex = inputs.front().cast<BlockArgument>().getArgNumber();
+      markAllPessimisticFixpoint(lattices.take_front(firstIndex));
+      markAllPessimisticFixpoint(
+          lattices.drop_front(firstIndex + inputs.size()));
+    }
+
+    for (auto it : llvm::zip(*operands, lattices.drop_front(firstIndex)))
+      join(std::get<1>(it), *getLatticeElementFor(point, std::get<0>(it)));
+  }
+}
+
+const AbstractSparseLattice *
+AbstractSparseDataFlowAnalysis::getLatticeElementFor(ProgramPoint point,
+                                                     Value value) {
+  AbstractSparseLattice *state = getLatticeElement(value);
+  addDependency(state, point);
+  return state;
+}
+
+void AbstractSparseDataFlowAnalysis::markPessimisticFixpoint(
+    AbstractSparseLattice *lattice) {
+  propagateIfChanged(lattice, lattice->markPessimisticFixpoint());
+}
+
+void AbstractSparseDataFlowAnalysis::markAllPessimisticFixpoint(
+    ArrayRef<AbstractSparseLattice *> lattices) {
+  for (AbstractSparseLattice *lattice : lattices) {
+    markPessimisticFixpoint(lattice);
+  }
+}
+
+void AbstractSparseDataFlowAnalysis::join(AbstractSparseLattice *lhs,
+                                          const AbstractSparseLattice &rhs) {
+  propagateIfChanged(lhs, lhs->join(rhs));
+}
+
+//===----------------------------------------------------------------------===//
+// SparseConstantPropagation
+//===----------------------------------------------------------------------===//
+
+void SparseConstantPropagation::visitOperation(
+    Operation *op, ArrayRef<const Lattice<ConstantValue> *> operands,
+    ArrayRef<Lattice<ConstantValue> *> results) {
+  LLVM_DEBUG(llvm::dbgs() << "SCP: Visiting operation: " << *op << "\n");
+
+  // Don't try to simulate the results of a region operation as we can't
+  // guarantee that folding will be out-of-place. We don't allow in-place
+  // folds as the desire here is for simulated execution, and not general
+  // folding.
+  if (op->getNumRegions())
+    return;
+
+  SmallVector<Attribute, 8> constantOperands;
+  constantOperands.reserve(op->getNumOperands());
+  for (auto *operandLattice : operands)
+    constantOperands.push_back(operandLattice->getValue().getConstantValue());
+
+  // Save the original operands and attributes just in case the operation
+  // folds in-place. The constant passed in may not correspond to the real
+  // runtime value, so in-place updates are not allowed.
+  SmallVector<Value, 8> originalOperands(op->getOperands());
+  DictionaryAttr originalAttrs = op->getAttrDictionary();
+
+  // Simulate the result of folding this operation to a constant. If folding
+  // fails or was an in-place fold, mark the results as overdefined.
+  SmallVector<OpFoldResult, 8> foldResults;
+  foldResults.reserve(op->getNumResults());
+  if (failed(op->fold(constantOperands, foldResults))) {
+    markAllPessimisticFixpoint(results);
+    return;
+  }
+
+  // If the folding was in-place, mark the results as overdefined and reset
+  // the operation. We don't allow in-place folds as the desire here is for
+  // simulated execution, and not general folding.
+  if (foldResults.empty()) {
+    op->setOperands(originalOperands);
+    op->setAttrs(originalAttrs);
+    return;
+  }
+
+  // Merge the fold results into the lattice for this operation.
+  assert(foldResults.size() == op->getNumResults() && "invalid result size");
+  for (const auto it : llvm::zip(results, foldResults)) {
+    Lattice<ConstantValue> *lattice = std::get<0>(it);
+
+    // Merge in the result of the fold, either a constant or a value.
+    OpFoldResult foldResult = std::get<1>(it);
+    if (Attribute attr = foldResult.dyn_cast<Attribute>()) {
+      LLVM_DEBUG(llvm::dbgs() << "Folded to constant: " << attr << "\n");
+      propagateIfChanged(lattice,
+                         lattice->join(ConstantValue(attr, op->getDialect())));
+    } else {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "Folded to value: " << foldResult.get<Value>() << "\n");
+      AbstractSparseDataFlowAnalysis::join(
+          lattice, *getLatticeElement(foldResult.get<Value>()));
     }
   }
 }
