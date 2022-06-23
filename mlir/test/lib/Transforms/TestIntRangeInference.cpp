@@ -19,13 +19,14 @@
 using namespace mlir;
 
 /// Patterned after SCCP
-static LogicalResult replaceWithConstant(IntRangeAnalysis &analysis,
-                                         OpBuilder &b, OperationFolder &folder,
-                                         Value value) {
-  Optional<ConstantIntRanges> maybeInferredRange = analysis.getResult(value);
-  if (!maybeInferredRange)
+static LogicalResult replaceWithConstant(DataFlowSolver &solver, OpBuilder &b,
+                                         OperationFolder &folder, Value value) {
+  auto *maybeInferredRange =
+      solver.lookupState<IntegerValueRangeLattice>(value);
+  if (!maybeInferredRange || maybeInferredRange->isUninitialized())
     return failure();
-  const ConstantIntRanges &inferredRange = maybeInferredRange.getValue();
+  const ConstantIntRanges &inferredRange =
+      maybeInferredRange->getValue().getValue();
   Optional<APInt> maybeConstValue = inferredRange.getConstantValue();
   if (!maybeConstValue.hasValue())
     return failure();
@@ -44,7 +45,7 @@ static LogicalResult replaceWithConstant(IntRangeAnalysis &analysis,
   return success();
 }
 
-static void rewrite(IntRangeAnalysis &analysis, MLIRContext *context,
+static void rewrite(DataFlowSolver &solver, MLIRContext *context,
                     MutableArrayRef<Region> initialRegions) {
   SmallVector<Block *> worklist;
   auto addToWorklist = [&](MutableArrayRef<Region> regions) {
@@ -67,7 +68,7 @@ static void rewrite(IntRangeAnalysis &analysis, MLIRContext *context,
       bool replacedAll = op.getNumResults() != 0;
       for (Value res : op.getResults())
         replacedAll &=
-            succeeded(replaceWithConstant(analysis, builder, folder, res));
+            succeeded(replaceWithConstant(solver, builder, folder, res));
 
       // If all of the results of the operation were replaced, try to erase
       // the operation completely.
@@ -84,7 +85,7 @@ static void rewrite(IntRangeAnalysis &analysis, MLIRContext *context,
     // Replace any block arguments with constants.
     builder.setInsertionPointToStart(block);
     for (BlockArgument arg : block->getArguments())
-      (void)replaceWithConstant(analysis, builder, folder, arg);
+      (void)replaceWithConstant(solver, builder, folder, arg);
   }
 }
 
@@ -100,8 +101,12 @@ struct TestIntRangeInference
 
   void runOnOperation() override {
     Operation *op = getOperation();
-    IntRangeAnalysis analysis(op);
-    rewrite(analysis, op->getContext(), op->getRegions());
+    DataFlowSolver solver;
+    solver.load<DeadCodeAnalysis>();
+    solver.load<IntegerRangeAnalysis>();
+    if (failed(solver.initializeAndRun(op)))
+      return signalPassFailure();
+    rewrite(solver, op->getContext(), op->getRegions());
   }
 };
 } // end anonymous namespace

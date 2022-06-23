@@ -189,10 +189,19 @@ void DeadCodeAnalysis::initializeSymbolCallables(Operation *top) {
                                 walkFn);
 }
 
+/// Returns true if the operation terminates a block. It is insufficient to
+/// check for `OpTrait::IsTerminator` because unregistered operations can be
+/// terminators.
+static bool isTerminator(Operation *op) {
+  if (op->hasTrait<OpTrait::IsTerminator>())
+    return true;
+  return &op->getBlock()->back() == op;
+}
+
 LogicalResult DeadCodeAnalysis::initializeRecursively(Operation *op) {
   // Initialize the analysis by visiting every op with control-flow semantics.
-  if (op->getNumRegions() || op->getNumSuccessors() ||
-      op->hasTrait<OpTrait::IsTerminator>() || isa<CallOpInterface>(op)) {
+  if (op->getNumRegions() || op->getNumSuccessors() || isTerminator(op) ||
+      isa<CallOpInterface>(op)) {
     // When the liveness of the parent block changes, make sure to re-invoke the
     // analysis on the op.
     if (op->getBlock())
@@ -262,7 +271,7 @@ LogicalResult DeadCodeAnalysis::visit(ProgramPoint point) {
     }
   }
 
-  if (op->hasTrait<OpTrait::IsTerminator>() && !op->getNumSuccessors()) {
+  if (isTerminator(op) && !op->getNumSuccessors()) {
     if (auto branch = dyn_cast<RegionBranchOpInterface>(op->getParentOp())) {
       // Visit the exiting terminator of a region.
       visitRegionTerminator(op, branch);
@@ -593,7 +602,9 @@ void AbstractSparseDataFlowAnalysis::visitBlock(Block *block) {
     }
 
     // Otherwise, we can't reason about the data-flow.
-    return markAllPessimisticFixpoint(argLattices);
+    return visitNonControlFlowArgumentsImpl(block->getParentOp(),
+                                            RegionSuccessor(block->getParent()),
+                                            argLattices, /*firstIndex=*/0);
   }
 
   // Iterate over the predecessors of the non-entry block.
@@ -646,7 +657,7 @@ void AbstractSparseDataFlowAnalysis::visitRegionSuccessors(
       operands = branch.getSuccessorEntryOperands(successorIndex);
       // Otherwise, try to deduce the operands from a region return-like op.
     } else {
-      assert(op->hasTrait<OpTrait::IsTerminator>() && "expected a terminator");
+      assert(isTerminator(op) && "expected a terminator");
       if (isRegionReturnLike(op))
         operands = getRegionBranchSuccessorOperands(op, successorIndex);
     }
@@ -660,17 +671,26 @@ void AbstractSparseDataFlowAnalysis::visitRegionSuccessors(
     assert(inputs.size() == operands->size() &&
            "expected the same number of successor inputs as operands");
 
-    // TODO: This was updated to be exposed upstream.
     unsigned firstIndex = 0;
     if (inputs.size() != lattices.size()) {
-      if (inputs.empty()) {
-        markAllPessimisticFixpoint(lattices);
-        return;
+      if (auto *op = point.dyn_cast<Operation *>()) {
+        if (!inputs.empty())
+          firstIndex = inputs.front().cast<OpResult>().getResultNumber();
+        visitNonControlFlowArgumentsImpl(
+            branch,
+            RegionSuccessor(
+                branch->getResults().slice(firstIndex, inputs.size())),
+            lattices, firstIndex);
+      } else {
+        if (!inputs.empty())
+          firstIndex = inputs.front().cast<BlockArgument>().getArgNumber();
+        Region *region = point.get<Block *>()->getParent();
+        visitNonControlFlowArgumentsImpl(
+            branch,
+            RegionSuccessor(region, region->getArguments().slice(
+                                        firstIndex, inputs.size())),
+            lattices, firstIndex);
       }
-      firstIndex = inputs.front().cast<BlockArgument>().getArgNumber();
-      markAllPessimisticFixpoint(lattices.take_front(firstIndex));
-      markAllPessimisticFixpoint(
-          lattices.drop_front(firstIndex + inputs.size()));
     }
 
     for (auto it : llvm::zip(*operands, lattices.drop_front(firstIndex)))
@@ -717,7 +737,7 @@ void SparseConstantPropagation::visitOperation(
   // folds as the desire here is for simulated execution, and not general
   // folding.
   if (op->getNumRegions())
-    return;
+    return markAllPessimisticFixpoint(results);
 
   SmallVector<Attribute, 8> constantOperands;
   constantOperands.reserve(op->getNumOperands());
@@ -734,10 +754,8 @@ void SparseConstantPropagation::visitOperation(
   // fails or was an in-place fold, mark the results as overdefined.
   SmallVector<OpFoldResult, 8> foldResults;
   foldResults.reserve(op->getNumResults());
-  if (failed(op->fold(constantOperands, foldResults))) {
-    markAllPessimisticFixpoint(results);
-    return;
-  }
+  if (failed(op->fold(constantOperands, foldResults)))
+    return markAllPessimisticFixpoint(results);
 
   // If the folding was in-place, mark the results as overdefined and reset
   // the operation. We don't allow in-place folds as the desire here is for
@@ -745,7 +763,7 @@ void SparseConstantPropagation::visitOperation(
   if (foldResults.empty()) {
     op->setOperands(originalOperands);
     op->setAttrs(originalAttrs);
-    return;
+    return markAllPessimisticFixpoint(results);
   }
 
   // Merge the fold results into the lattice for this operation.
