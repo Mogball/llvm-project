@@ -22,6 +22,9 @@
 #include "llvm/Support/TypeName.h"
 #include <queue>
 
+#undef LLVM_ENABLE_ABI_BREAKING_CHECKS
+#define LLVM_ENABLE_ABI_BREAKING_CHECKS 1
+
 namespace mlir {
 
 //===----------------------------------------------------------------------===//
@@ -167,6 +170,22 @@ struct ProgramPoint
   /// Print the program point.
   void print(raw_ostream &os) const;
 
+  /// Check if this program point is a generic program point of a given type.
+  template <typename GenericPointT>
+  bool is_generic() const {
+    if (auto *genericPoint = dyn_cast<GenericProgramPoint *>())
+      return isa<GenericPointT>(genericPoint);
+    return false;
+  }
+
+  /// Try to cast this program point to a generic program point of a given type.
+  template <typename GenericPointT>
+  GenericPointT *dyn_cast_generic() const {
+    if (auto *genericPoint = dyn_cast<GenericProgramPoint *>())
+      return dyn_cast<GenericPointT>(genericPoint);
+    return nullptr;
+  }
+
   /// Get the source location of the program point.
   Location getLoc() const;
 };
@@ -231,15 +250,11 @@ public:
   template <typename StateT, typename PointT>
   StateT *getOrCreateState(PointT point);
 
-  /// Propagate an update to an analysis state if it changed by pushing
-  /// dependent work items to the back of the queue.
-  void propagateIfChanged(AnalysisState *state, ChangeResult changed);
-
-  /// Add a dependency to an analysis state on a child analysis and program
-  /// point. If the state is updated, the child analysis must be invoked on the
-  /// given program point again.
-  void addDependency(AnalysisState *state, DataFlowAnalysis *analysis,
-                     ProgramPoint point);
+  /// Get the loaded analyses that could provide values for the given analysis
+  /// type at a given program point.
+  /// TODO: This is only to support multi-valued states.
+  void getProviders(TypeID stateID, ProgramPoint point,
+                    SmallVectorImpl<TypeID> &providerIDs);
 
 private:
   /// The solver's work queue. Work items can be inserted to the front of the
@@ -286,7 +301,8 @@ public:
   virtual ~AnalysisState();
 
   /// Create the analysis state at the given program point.
-  AnalysisState(ProgramPoint point) : point(point) {}
+  AnalysisState(DataFlowSolver &solver, TypeID stateID, ProgramPoint point)
+      : solver(solver), stateID(stateID), point(point) {}
 
   /// Returns true if the analysis state is uninitialized.
   virtual bool isUninitialized() const = 0;
@@ -298,12 +314,21 @@ public:
   /// Print the contents of the analysis state.
   virtual void print(raw_ostream &os) const = 0;
 
+  /// Propagate an update to an analysis state if it changed by pushing
+  /// dependent work items to the back of the queue.
+  void propagateIfChanged(ChangeResult changed);
+
+  /// Add a dependency to this analysis state on a child analysis and program
+  /// point. If the state is updated, the child analysis must be invoked on the
+  /// given program point again.
+  void addDependency(DataFlowAnalysis *analysis, ProgramPoint point);
+
 protected:
   /// This function is called by the solver when the analysis state is updated
   /// to optionally enqueue more work items. For example, if a state tracks
   /// dependents through the IR (e.g. use-def chains), this function can be
   /// implemented to push those dependents on the worklist.
-  virtual void onUpdate(DataFlowSolver *solver) const {}
+  virtual void onUpdate() const {}
 
   /// The dependency relations originating from this analysis state. An entry
   /// `state -> (analysis, point)` is created when `analysis` queries `state`
@@ -315,6 +340,12 @@ protected:
   ///
   /// Store the dependents on the analysis state for efficiency.
   SetVector<DataFlowSolver::WorkItem> dependents;
+
+  /// A reference to the owning data-flow solver.
+  DataFlowSolver &solver;
+
+  /// The state kind.
+  TypeID stateID;
 
   /// The program point to which the state belongs.
   ProgramPoint point;
@@ -353,7 +384,8 @@ public:
   virtual ~DataFlowAnalysis();
 
   /// Create an analysis with a reference to the parent solver.
-  explicit DataFlowAnalysis(DataFlowSolver &solver);
+  explicit DataFlowAnalysis(TypeID analysisID, DataFlowSolver &solver)
+      : analysisID(analysisID), solver(solver) {}
 
   /// Initialize the analysis from the provided top-level operation by building
   /// an initial dependency graph between all program points of interest. This
@@ -375,7 +407,7 @@ public:
   /// indicating that, if the state is updated, the solver should invoke `solve`
   /// on the program point. The dependent point does not have to be the same as
   /// the provided point. An update to a state is propagated by calling
-  /// `propagateIfChange` on the state. If the state has changed, then all its
+  /// `propagateIfChanged` on the state. If the state has changed, then all its
   /// dependents are placed on the worklist.
   ///
   /// The dependency graph does not need to be static. Each invocation of
@@ -384,14 +416,18 @@ public:
   /// will provide a value for then.
   virtual LogicalResult visit(ProgramPoint point) = 0;
 
+  /// Returns true if this analysis could potentially provide a value for the
+  /// given state type at a given program point.
+  virtual bool provides(TypeID stateID, ProgramPoint point) const {
+    return false;
+  }
+
+#if LLVM_ENABLE_ABI_BREAKING_CHECKS
+  /// Get the debug name of this analysis.
+  StringRef getDebugName() const { return debugName; }
+#endif // LLVM_ENABLE_ABI_BREAKING_CHECKS
+
 protected:
-  /// Create a dependency between the given analysis state and program point
-  /// on this analysis.
-  void addDependency(AnalysisState *state, ProgramPoint point);
-
-  /// Propagate an update to a state if it changed.
-  void propagateIfChanged(AnalysisState *state, ChangeResult changed);
-
   /// Register a custom program point class.
   template <typename PointT>
   void registerPointKind() {
@@ -418,7 +454,7 @@ protected:
   template <typename StateT, typename PointT>
   const StateT *getOrCreateFor(ProgramPoint dependent, PointT point) {
     StateT *state = getOrCreate<StateT>(point);
-    addDependency(state, dependent);
+    state->addDependency(this, dependent);
     return state;
   }
 
@@ -426,6 +462,9 @@ protected:
   /// When compiling with debugging, keep a name for the analyis.
   StringRef debugName;
 #endif // LLVM_ENABLE_ABI_BREAKING_CHECKS
+
+  /// The analysis type.
+  TypeID analysisID;
 
 private:
   /// The parent data-flow solver.
@@ -449,7 +488,8 @@ StateT *DataFlowSolver::getOrCreateState(PointT point) {
   std::unique_ptr<AnalysisState> &state =
       analysisStates[{ProgramPoint(point), TypeID::get<StateT>()}];
   if (!state) {
-    state = std::unique_ptr<StateT>(new StateT(point));
+    state = std::unique_ptr<StateT>(
+        new StateT(*this, TypeID::get<StateT>(), point));
 #if LLVM_ENABLE_ABI_BREAKING_CHECKS
     state->debugName = llvm::getTypeName<StateT>();
 #endif // LLVM_ENABLE_ABI_BREAKING_CHECKS
@@ -466,6 +506,9 @@ inline raw_ostream &operator<<(raw_ostream &os, ProgramPoint point) {
   point.print(os);
   return os;
 }
+
+Diagnostic &operator<<(Diagnostic &diag, const AnalysisState &state);
+Diagnostic &operator<<(Diagnostic &diag, ProgramPoint point);
 
 } // end namespace mlir
 

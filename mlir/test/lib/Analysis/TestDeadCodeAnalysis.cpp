@@ -62,7 +62,10 @@ namespace {
 /// This is a simple analysis that implements a transfer function for constant
 /// operations.
 struct ConstantAnalysis : public DataFlowAnalysis {
-  using DataFlowAnalysis::DataFlowAnalysis;
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConstantAnalysis)
+
+  explicit ConstantAnalysis(DataFlowSolver &solver)
+      : DataFlowAnalysis(TypeID::get<ConstantAnalysis>(), solver) {}
 
   LogicalResult initialize(Operation *top) override {
     WalkResult result = top->walk([&](Operation *op) {
@@ -77,9 +80,10 @@ struct ConstantAnalysis : public DataFlowAnalysis {
     Operation *op = point.get<Operation *>();
     Attribute value;
     if (matchPattern(op, m_Constant(&value))) {
-      auto *constant = getOrCreate<Lattice<ConstantValue>>(op->getResult(0));
-      propagateIfChanged(
-          constant, constant->join(ConstantValue(value, op->getDialect())));
+      auto *constant = getOrCreate<ConstantValueLattice>(op->getResult(0));
+      constant->propagateIfChanged(
+          constant->join(ConstantValue(value, op->getDialect()),
+                         TypeID::get<ConstantAnalysis>()));
       return success();
     }
     markAllPessimisticFixpoint(op->getResults());
@@ -92,10 +96,14 @@ struct ConstantAnalysis : public DataFlowAnalysis {
   /// pessimistic fixpoint.
   void markAllPessimisticFixpoint(ValueRange values) {
     for (Value value : values) {
-      auto *constantValue = getOrCreate<Lattice<ConstantValue>>(value);
-      propagateIfChanged(constantValue,
-                         constantValue->markPessimisticFixpoint());
+      auto *constantValue = getOrCreate<ConstantValueLattice>(value);
+      constantValue->propagateIfChanged(constantValue->markPessimisticFixpoint(
+          TypeID::get<ConstantAnalysis>()));
     }
+  }
+
+  bool provides(TypeID stateID, ProgramPoint point) const override {
+    return stateID == TypeID::get<ConstantValueLattice>() && point.is<Value>();
   }
 };
 

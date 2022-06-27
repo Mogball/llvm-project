@@ -163,6 +163,6 @@ const AbstractDenseLattice *
 AbstractDenseDataFlowAnalysis::getLatticeFor(ProgramPoint dependent,
                                              ProgramPoint point) {
   AbstractDenseLattice *state = getLattice(point);
-  addDependency(state, dependent);
+  state->addDependency(this, dependent);
   return state;
 }

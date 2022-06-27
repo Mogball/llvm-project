@@ -33,24 +33,26 @@ namespace mlir {
 class AbstractSparseLattice : public AnalysisState {
 public:
   /// Lattices can only be created for values.
-  AbstractSparseLattice(Value value) : AnalysisState(value) {}
-
-  /// Join the information contained in 'rhs' into this lattice. Returns
-  /// if the value of the lattice changed.
-  virtual ChangeResult join(const AbstractSparseLattice &rhs) = 0;
+  AbstractSparseLattice(DataFlowSolver &solver, TypeID stateID, Value value)
+      : AnalysisState(solver, stateID, value) {}
 
   /// Returns true if the lattice element is at fixpoint and further calls to
   /// `join` will not update the value of the element.
   virtual bool isAtFixpoint() const = 0;
 
+  /// Join the information contained in 'rhs' into this lattice. Returns
+  /// if the value of the lattice changed.
+  virtual ChangeResult join(const AbstractSparseLattice &rhs,
+                            TypeID instanceID = {}) = 0;
+
   /// Mark the lattice element as having reached a pessimistic fixpoint. This
   /// means that the lattice may potentially have conflicting value states, and
   /// only the most conservative value should be relied on.
-  virtual ChangeResult markPessimisticFixpoint() = 0;
+  virtual ChangeResult markPessimisticFixpoint(TypeID instanceID) = 0;
 
   /// When the lattice gets updated, propagate an update to users of the value
   /// using its use-def chain to subscribed analyses.
-  void onUpdate(DataFlowSolver *solver) const override;
+  void onUpdate() const override;
 
   /// Subscribe an analysis to updates of the lattice. When the lattice changes,
   /// subscribed analyses are re-invoked on all users of the value. This is
@@ -82,8 +84,8 @@ template <typename ValueT>
 class Lattice : public AbstractSparseLattice {
 public:
   /// Construct a lattice with a known value.
-  explicit Lattice(Value value)
-      : AbstractSparseLattice(value),
+  explicit Lattice(DataFlowSolver &solver, TypeID stateID, Value value)
+      : AbstractSparseLattice(solver, stateID, value),
         knownValue(ValueT::getPessimisticValueState(value)) {}
 
   /// Return the value held by this lattice. This requires that the value is
@@ -101,7 +103,13 @@ public:
   /// Force the initialization of the element by setting it to its pessimistic
   /// fixpoint.
   ChangeResult defaultInitialize() override {
-    return markPessimisticFixpoint();
+    if (isAtFixpoint())
+      return ChangeResult::NoChange;
+
+    // For this fixed point, we take whatever we knew to be true and set that
+    // to our optimistic value.
+    optimisticValue = knownValue;
+    return ChangeResult::Change;
   }
 
   /// Returns true if the lattice has reached a fixpoint. A fixpoint is when
@@ -111,7 +119,8 @@ public:
 
   /// Join the information contained in the 'rhs' lattice into this
   /// lattice. Returns if the state of the current lattice changed.
-  ChangeResult join(const AbstractSparseLattice &rhs) override {
+  ChangeResult join(const AbstractSparseLattice &rhs,
+                    TypeID instanceID = {}) override {
     const Lattice<ValueT> &rhsLattice =
         static_cast<const Lattice<ValueT> &>(rhs);
 
@@ -125,7 +134,7 @@ public:
 
   /// Join the information contained in the 'rhs' value into this
   /// lattice. Returns if the state of the current lattice changed.
-  ChangeResult join(const ValueT &rhs) {
+  ChangeResult join(const ValueT &rhs, TypeID instanceID = {}) {
     // If the current lattice is uninitialized, copy the rhs value.
     if (isUninitialized()) {
       optimisticValue = rhs;
@@ -150,14 +159,8 @@ public:
   /// Mark the lattice element as having reached a pessimistic fixpoint. This
   /// means that the lattice may potentially have conflicting value states,
   /// and only the conservatively known value state should be relied on.
-  ChangeResult markPessimisticFixpoint() override {
-    if (isAtFixpoint())
-      return ChangeResult::NoChange;
-
-    // For this fixed point, we take whatever we knew to be true and set that
-    // to our optimistic value.
-    optimisticValue = knownValue;
-    return ChangeResult::Change;
+  ChangeResult markPessimisticFixpoint(TypeID instanceID = {}) override {
+    return defaultInitialize();
   }
 
   /// Print the lattice element.
@@ -179,6 +182,148 @@ private:
   /// The currently computed value that is optimistically assumed to be true,
   /// or None if the lattice element is uninitialized.
   Optional<ValueT> optimisticValue;
+};
+
+//===----------------------------------------------------------------------===//
+// MultiLattice
+//===----------------------------------------------------------------------===//
+
+/// TODO: Multiple value providers should be supported by the framework.
+template <typename ValueT>
+class MultiLattice : public AbstractSparseLattice {
+public:
+  /// Construct a lattice with a known value.
+  explicit MultiLattice(DataFlowSolver &solver, TypeID stateID, Value value)
+      : AbstractSparseLattice(solver, stateID, value),
+        knownValue(ValueT::getPessimisticValueState(value)) {
+    solver.getProviders(stateID, value, providerIDs);
+  }
+
+  /// Return the value held by this lattice. This requires that the value is
+  /// initialized.
+  ValueT &getValue() {
+    assert(!isUninitialized() && "expected known lattice element");
+    return *optimisticValue;
+  }
+  const ValueT &getValue() const {
+    return const_cast<MultiLattice<ValueT> *>(this)->getValue();
+  }
+
+  /// Returns true if the value of this lattice hasn't yet been initialized.
+  bool isUninitialized() const override { return !optimisticValue.hasValue(); }
+
+  /// Force the initialization of the element by setting it to its pessimistic
+  /// fixpoint.
+  ChangeResult defaultInitialize() override {
+    if (isAtFixpoint())
+      return ChangeResult::NoChange;
+
+    // For this fixed point, we take whatever we knew to be true and set that
+    // to our optimistic value.
+    optimisticValue = knownValue;
+    return ChangeResult::Change;
+  }
+
+  /// Returns true if the lattice has reached a fixpoint. A fixpoint is when
+  /// the information optimistically assumed to be true is the same as the
+  /// information known to be true.
+  bool isAtFixpoint() const override { return optimisticValue == knownValue; }
+
+  /// Join the information contained in the 'rhs' lattice into this
+  /// lattice. Returns if the state of the current lattice changed.
+  ChangeResult join(const AbstractSparseLattice &rhs,
+                    TypeID instanceID) override {
+    // If we are at a fixpoint, or rhs is uninitialized, there is nothing to do.
+    if (isAtFixpoint() || rhs.isUninitialized())
+      return ChangeResult::NoChange;
+
+    // Join the provided values by `instanceID`.
+    auto &rhsLattice = static_cast<const MultiLattice<ValueT> &>(rhs);
+    auto it = rhsLattice.providedValues.find(instanceID);
+    // Return if the RHS has an uninitialized provided value.
+    if (it == rhsLattice.providedValues.end())
+      return ChangeResult::NoChange;
+    return join(it->second, instanceID);
+  }
+
+  /// Join the information contained in the 'rhs' value into this
+  /// lattice. Returns if the state of the current lattice changed.
+  ChangeResult join(const ValueT &rhs, TypeID instanceID) {
+    // Try to initialize the LHS value.
+    auto it = providedValues.try_emplace(instanceID, rhs);
+    ValueT &lhs = it.first->second;
+    // If the value was already initialized, join them and update the value.
+    if (!it.second) {
+      ValueT nextValue = ValueT::join(lhs, rhs);
+      if (nextValue == lhs)
+        return ChangeResult::NoChange;
+      lhs = nextValue;
+    }
+
+    // If the provided value by `instanceID` went to overdefined, only update
+    // the optimistic value if all values are now overdefined.
+    if (lhs.isOverdefined()) {
+      for (TypeID providerID : providerIDs) {
+        auto it = providedValues.find(providerID);
+        if (it == providedValues.end() || !it->second.isOverdefined())
+          return ChangeResult::NoChange;
+      }
+    }
+
+    // If the optimistic value is uninitialized, take the RHS value.
+    if (isUninitialized()) {
+      optimisticValue = rhs;
+      return ChangeResult::Change;
+    }
+
+    // Otherwise, join and update the optimistic value with the RHS value.
+    ValueT nextValue = ValueT::join(*optimisticValue, rhs);
+    if (nextValue == *optimisticValue)
+      return ChangeResult::NoChange;
+    optimisticValue = nextValue;
+    return ChangeResult::Change;
+  }
+
+  /// Mark the lattice element as having reached a pessimistic fixpoint. This
+  /// means that the lattice may potentially have conflicting value states,
+  /// and only the conservatively known value state should be relied on.
+  ChangeResult markPessimisticFixpoint(TypeID instanceID) override {
+    return join(knownValue, instanceID);
+  }
+
+  /// Print the lattice element.
+  void print(raw_ostream &os) const override {
+    os << "[";
+    knownValue.print(os);
+    os << ", ";
+    if (optimisticValue) {
+      optimisticValue->print(os);
+    } else {
+      os << "<NULL>";
+    }
+    os << "] : {";
+    llvm::interleaveComma(llvm::enumerate(providerIDs), os, [&](auto &it) {
+      os << it.index() << " = ";
+      auto value = providedValues.find(it.value());
+      if (value == providedValues.end())
+        os << "<NULL>";
+      else
+        value->second.print(os);
+    });
+    os << "}";
+  }
+
+private:
+  /// The value that is conservatively known to be true.
+  ValueT knownValue;
+  /// The currently computed value that is optimistically assumed to be true,
+  /// or None if the lattice element is uninitialized.
+  Optional<ValueT> optimisticValue;
+
+  /// Values provided by specific analysis.
+  llvm::SmallDenseMap<TypeID, ValueT, 2> providedValues;
+  /// The analysis IDs that provide values.
+  SmallVector<TypeID, 2> providerIDs;
 };
 
 //===----------------------------------------------------------------------===//
@@ -209,7 +354,7 @@ public:
   /// When the state of the program point is changed to live, re-invoke
   /// subscribed analyses on the operations in the block and on the block
   /// itself.
-  void onUpdate(DataFlowSolver *solver) const override;
+  void onUpdate() const override;
 
   /// Subscribe an analysis to changes to the liveness.
   void blockContentSubscribe(DataFlowAnalysis *analysis) {
@@ -259,6 +404,9 @@ public:
     return lhs == rhs ? lhs : ConstantValue();
   }
 
+  /// The constant value is overdefined if it is unknown.
+  bool isOverdefined() const { return !constant; }
+
   /// Print the constant value.
   void print(raw_ostream &os) const;
 
@@ -267,6 +415,12 @@ private:
   Attribute constant;
   /// An dialect instance that can be used to materialize the constant.
   Dialect *dialect;
+};
+
+class ConstantValueLattice : public MultiLattice<ConstantValue> {
+public:
+  // using Lattice::Lattice;
+  using MultiLattice::MultiLattice;
 };
 
 //===----------------------------------------------------------------------===//
@@ -379,6 +533,10 @@ public:
   /// successors are live.
   LogicalResult visit(ProgramPoint point) override;
 
+  /// This analysis determines the liveness of blocks, CFG edges, function
+  /// callsites, and region control-flow predecessors.
+  bool provides(TypeID stateID, ProgramPoint point) const override;
+
 private:
   /// Find and mark symbol callables with potentially unknown callsites as
   /// having overdefined predecessors. `top` is the top-level operation that the
@@ -446,7 +604,8 @@ public:
   LogicalResult visit(ProgramPoint point) override;
 
 protected:
-  explicit AbstractSparseDataFlowAnalysis(DataFlowSolver &solver);
+  explicit AbstractSparseDataFlowAnalysis(TypeID analysisID,
+                                          DataFlowSolver &solver);
 
   /// The operation transfer function. Given the operand lattices, this
   /// function is expected to set the result lattices.
@@ -515,8 +674,8 @@ private:
 template <typename StateT>
 class SparseDataFlowAnalysis : public AbstractSparseDataFlowAnalysis {
 public:
-  explicit SparseDataFlowAnalysis(DataFlowSolver &solver)
-      : AbstractSparseDataFlowAnalysis(solver) {}
+  explicit SparseDataFlowAnalysis(TypeID analysisID, DataFlowSolver &solver)
+      : AbstractSparseDataFlowAnalysis(analysisID, solver) {}
 
   /// Visit an operation with the lattices of its operands. This function is
   /// expected to set the lattices of the operation's results.
@@ -536,6 +695,11 @@ public:
     markAllPessimisticFixpoint(argLattices.take_front(firstIndex));
     markAllPessimisticFixpoint(argLattices.drop_front(
         firstIndex + successor.getSuccessorInputs().size()));
+  }
+
+  /// This analysis provides `StateT` for all SSA values.
+  bool provides(TypeID stateID, ProgramPoint point) const override {
+    return point.is<Value>() && stateID == TypeID::get<StateT>();
   }
 
 protected:
@@ -593,13 +757,15 @@ private:
 /// operands, by speculatively folding operations. When combined with dead-code
 /// analysis, this becomes sparse conditional constant propagation (SCCP).
 class SparseConstantPropagation
-    : public SparseDataFlowAnalysis<Lattice<ConstantValue>> {
+    : public SparseDataFlowAnalysis<ConstantValueLattice> {
 public:
-  using SparseDataFlowAnalysis::SparseDataFlowAnalysis;
+  explicit SparseConstantPropagation(DataFlowSolver &solver)
+      : SparseDataFlowAnalysis(TypeID::get<SparseConstantPropagation>(),
+                               solver) {}
 
   void visitOperation(Operation *op,
-                      ArrayRef<const Lattice<ConstantValue> *> operands,
-                      ArrayRef<Lattice<ConstantValue> *> results) override;
+                      ArrayRef<const ConstantValueLattice *> operands,
+                      ArrayRef<ConstantValueLattice *> results) override;
 };
 
 } // end namespace mlir

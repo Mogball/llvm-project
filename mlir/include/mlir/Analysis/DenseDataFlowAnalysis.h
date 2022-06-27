@@ -91,12 +91,12 @@ protected:
   /// Mark the dense lattice as having reached its pessimistic fixpoint and
   /// propagate an update if it changed.
   void reset(AbstractDenseLattice *lattice) {
-    propagateIfChanged(lattice, lattice->reset());
+    lattice->propagateIfChanged(lattice->reset());
   }
 
   /// Join a lattice with another and propagate an update if it changed.
   void join(AbstractDenseLattice *lhs, const AbstractDenseLattice &rhs) {
-    propagateIfChanged(lhs, lhs->join(rhs));
+    lhs->propagateIfChanged(lhs->join(rhs));
   }
 
 private:
@@ -136,6 +136,12 @@ public:
   /// function is expected to set the dense lattice after its execution.
   virtual void visitOperation(Operation *op, const LatticeT &before,
                               LatticeT *after) = 0;
+
+  /// This analysis provides `LatticeT` for all operations and blocks.
+  bool provides(TypeID stateID, ProgramPoint point) const override {
+    return stateID == TypeID::get<LatticeT>() &&
+           (point.is<Operation *>() || point.is<Block *>());
+  }
 
 protected:
   /// Get the dense lattice after this program point.

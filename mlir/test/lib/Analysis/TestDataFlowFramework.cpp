@@ -74,10 +74,15 @@ class FooAnalysis : public DataFlowAnalysis {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FooAnalysis)
 
-  using DataFlowAnalysis::DataFlowAnalysis;
+  explicit FooAnalysis(DataFlowSolver &solver)
+      : DataFlowAnalysis(TypeID::get<FooAnalysis>(), solver) {}
 
   LogicalResult initialize(Operation *top) override;
   LogicalResult visit(ProgramPoint point) override;
+  bool provides(TypeID stateID, ProgramPoint point) const override {
+    return stateID == TypeID::get<FooState>() &&
+           (point.is<Operation *>() || point.is<Block *>());
+  }
 
 private:
   void visitBlock(Block *block);
@@ -138,7 +143,7 @@ void FooAnalysis::visitBlock(Block *block) {
         getOrCreateFor<FooState>(block, pred->getTerminator());
     result |= state->join(*predState);
   }
-  propagateIfChanged(state, result);
+  state->propagateIfChanged(result);
 }
 
 void FooAnalysis::visitOperation(Operation *op) {
@@ -158,7 +163,7 @@ void FooAnalysis::visitOperation(Operation *op) {
     uint64_t value = attr.getUInt();
     result |= state->join(value);
   }
-  propagateIfChanged(state, result);
+  state->propagateIfChanged(result);
 }
 
 void TestFooAnalysisPass::runOnOperation() {

@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "PassDetail.h"
+#include "mlir/Analysis/IntRangeAnalysis.h"
 #include "mlir/Analysis/SparseDataFlowAnalysis.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Dialect.h"
@@ -35,7 +36,7 @@ using namespace mlir;
 static LogicalResult replaceWithConstant(DataFlowSolver &solver,
                                          OpBuilder &builder,
                                          OperationFolder &folder, Value value) {
-  auto *lattice = solver.lookupState<Lattice<ConstantValue>>(value);
+  auto *lattice = solver.lookupState<ConstantValueLattice>(value);
   if (!lattice || lattice->isUninitialized())
     return failure();
   const ConstantValue &latticeValue = lattice->getValue();
@@ -118,6 +119,7 @@ void SCCP::runOnOperation() {
   DataFlowSolver solver;
   solver.load<DeadCodeAnalysis>();
   solver.load<SparseConstantPropagation>();
+  solver.load<IntegerRangeAnalysis>();
   if (failed(solver.initializeAndRun(op))) {
     op->emitError("SCCP analysis failed\n");
     return signalPassFailure();

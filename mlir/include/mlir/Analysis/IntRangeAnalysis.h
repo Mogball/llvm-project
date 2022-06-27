@@ -62,7 +62,7 @@ public:
 
   /// If the range can be narrowed to an integer constant, update the constant
   /// value of the SSA value.
-  void onUpdate(DataFlowSolver *solver) const override;
+  void onUpdate() const override;
 };
 
 /// Integer range analysis determines the integer value range of SSA values
@@ -71,7 +71,9 @@ public:
 class IntegerRangeAnalysis
     : public SparseDataFlowAnalysis<IntegerValueRangeLattice> {
 public:
-  using SparseDataFlowAnalysis::SparseDataFlowAnalysis;
+  explicit IntegerRangeAnalysis(DataFlowSolver &solver)
+      : SparseDataFlowAnalysis<IntegerValueRangeLattice>(
+            TypeID::get<IntegerRangeAnalysis>(), solver) {}
 
   /// Visit an operation. Invoke the transfer function on each operation that
   /// implements `InferIntRangeInterface`.
@@ -88,6 +90,10 @@ public:
   visitNonControlFlowArguments(Operation *op, const RegionSuccessor &successor,
                                ArrayRef<IntegerValueRangeLattice *> argLattices,
                                unsigned firstIndex) override;
+
+  /// This analysis also tries to narrow integer ranges to constant values for
+  /// SSA values.
+  bool provides(TypeID stateID, ProgramPoint point) const override;
 };
 
 } // end namespace mlir

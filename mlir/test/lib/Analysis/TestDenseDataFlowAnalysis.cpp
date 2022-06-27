@@ -125,7 +125,10 @@ private:
 
 class LastModifiedAnalysis : public DenseDataFlowAnalysis<LastModification> {
 public:
-  using DenseDataFlowAnalysis::DenseDataFlowAnalysis;
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LastModifiedAnalysis)
+
+  explicit LastModifiedAnalysis(DataFlowSolver &solver)
+      : DenseDataFlowAnalysis(TypeID::get<LastModifiedAnalysis>(), solver) {}
 
   /// Visit an operation. If the operation has no memory effects, then the state
   /// is propagated with no change. If the operation allocates a resource, then
@@ -148,7 +151,11 @@ struct UnderlyingValueLattice : public Lattice<UnderlyingValue> {
 class UnderlyingValueAnalysis
     : public SparseDataFlowAnalysis<UnderlyingValueLattice> {
 public:
-  using SparseDataFlowAnalysis::SparseDataFlowAnalysis;
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(UnderlyingValueAnalysis)
+
+  explicit UnderlyingValueAnalysis(DataFlowSolver &solver)
+      : SparseDataFlowAnalysis(TypeID::get<UnderlyingValueAnalysis>(), solver) {
+  }
 
   /// The underlying value of the results of an operation are not known.
   void visitOperation(Operation *op,
@@ -209,7 +216,7 @@ void LastModifiedAnalysis::visitOperation(Operation *op,
 
     result |= after->set(value, op);
   }
-  propagateIfChanged(after, result);
+  after->propagateIfChanged(result);
 }
 
 namespace {

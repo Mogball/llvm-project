@@ -30,25 +30,27 @@ IntegerValueRange IntegerValueRange::getPessimisticValueState(Value value) {
   return {{umin, umax, smin, smax}};
 }
 
-void IntegerValueRangeLattice::onUpdate(DataFlowSolver *solver) const {
-  Lattice::onUpdate(solver);
+void IntegerValueRangeLattice::onUpdate() const {
+  Lattice::onUpdate();
 
   // If the integer range can be narrowed to a constant, update the constant
   // value of the SSA value.
   Optional<APInt> constant = getValue().getValue().getConstantValue();
   auto value = point.get<Value>();
-  auto *cv = solver->getOrCreateState<Lattice<ConstantValue>>(value);
-  if (!constant)
-    return solver->propagateIfChanged(cv, cv->markPessimisticFixpoint());
+  auto *cv = solver.getOrCreateState<ConstantValueLattice>(value);
+  if (!constant) {
+    return cv->propagateIfChanged(
+        cv->markPessimisticFixpoint(TypeID::get<IntegerRangeAnalysis>()));
+  }
 
   Dialect *dialect;
   if (auto *parent = value.getDefiningOp())
     dialect = parent->getDialect();
   else
     dialect = value.getParentBlock()->getParentOp()->getDialect();
-  solver->propagateIfChanged(
-      cv, cv->join(ConstantValue(IntegerAttr::get(value.getType(), *constant),
-                                 dialect)));
+  cv->propagateIfChanged(cv->join(
+      ConstantValue(IntegerAttr::get(value.getType(), *constant), dialect),
+      TypeID::get<IntegerRangeAnalysis>()));
 }
 
 void IntegerRangeAnalysis::visitOperation(
@@ -61,12 +63,12 @@ void IntegerRangeAnalysis::visitOperation(
     if (std::get<1>(it).getType().isIntOrIndex()) {
       hasIntegerResult = true;
     } else {
-      propagateIfChanged(std::get<0>(it),
-                         std::get<0>(it)->markPessimisticFixpoint());
+      std::get<0>(it)->propagateIfChanged(
+          std::get<0>(it)->markPessimisticFixpoint());
     }
   }
   if (!hasIntegerResult)
-    return;
+    return markAllPessimisticFixpoint(results);
 
   auto inferrable = dyn_cast<InferIntRangeInterface>(op);
   if (!inferrable)
@@ -104,7 +106,7 @@ void IntegerRangeAnalysis::visitOperation(
       LLVM_DEBUG(llvm::dbgs() << "Loop variant loop result detected\n");
       changed |= lattice->markPessimisticFixpoint();
     }
-    propagateIfChanged(lattice, changed);
+    lattice->propagateIfChanged(changed);
   };
 
   inferrable.inferResultRanges(argRanges, joinCallback);
@@ -147,7 +149,7 @@ void IntegerRangeAnalysis::visitNonControlFlowArguments(
         LLVM_DEBUG(llvm::dbgs() << "Loop variant loop result detected\n");
         changed |= lattice->markPessimisticFixpoint();
       }
-      propagateIfChanged(lattice, changed);
+      lattice->propagateIfChanged(changed);
     };
 
     inferrable.inferResultRanges(argRanges, joinCallback);
@@ -208,10 +210,15 @@ void IntegerRangeAnalysis::visitNonControlFlowArguments(
 
     IntegerValueRangeLattice *ivEntry = getLatticeElement(*iv);
     auto ivRange = ConstantIntRanges::fromSigned(min, max);
-    propagateIfChanged(ivEntry, ivEntry->join(ivRange));
+    ivEntry->propagateIfChanged(ivEntry->join(ivRange));
     return;
   }
 
   return SparseDataFlowAnalysis::visitNonControlFlowArguments(
       op, successor, argLattices, firstIndex);
+}
+
+bool IntegerRangeAnalysis::provides(TypeID stateID, ProgramPoint point) const {
+  return SparseDataFlowAnalysis::provides(stateID, point) ||
+         (stateID == TypeID::get<ConstantValueLattice>() && point.is<Value>());
 }

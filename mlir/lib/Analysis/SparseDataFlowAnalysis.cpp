@@ -17,11 +17,11 @@ using namespace mlir;
 // AbstractSparseLattice
 //===----------------------------------------------------------------------===//
 
-void AbstractSparseLattice::onUpdate(DataFlowSolver *solver) const {
+void AbstractSparseLattice::onUpdate() const {
   // Push all users of the value to the queue.
   for (Operation *user : point.get<Value>().getUsers())
     for (DataFlowAnalysis *analysis : useDefSubscribers)
-      solver->enqueue({user, analysis});
+      solver.enqueue({user, analysis});
 }
 
 //===----------------------------------------------------------------------===//
@@ -39,20 +39,20 @@ void Executable::print(raw_ostream &os) const {
   os << (live ? "live" : "dead");
 }
 
-void Executable::onUpdate(DataFlowSolver *solver) const {
+void Executable::onUpdate() const {
   if (auto *block = point.dyn_cast<Block *>()) {
     // Re-invoke the analyses on the block itself.
     for (DataFlowAnalysis *analysis : subscribers)
-      solver->enqueue({block, analysis});
+      solver.enqueue({block, analysis});
     // Re-invoke the analyses on all operations in the block.
     for (DataFlowAnalysis *analysis : subscribers)
       for (Operation &op : *block)
-        solver->enqueue({&op, analysis});
+        solver.enqueue({&op, analysis});
   } else if (auto *programPoint = point.dyn_cast<GenericProgramPoint *>()) {
     // Re-invoke the analysis on the successor block.
     if (auto *edge = dyn_cast<CFGEdge>(programPoint))
       for (DataFlowAnalysis *analysis : subscribers)
-        solver->enqueue({edge->getTo(), analysis});
+        solver.enqueue({edge->getTo(), analysis});
   }
 }
 
@@ -116,7 +116,7 @@ void CFGEdge::print(raw_ostream &os) const {
 //===----------------------------------------------------------------------===//
 
 DeadCodeAnalysis::DeadCodeAnalysis(DataFlowSolver &solver)
-    : DataFlowAnalysis(solver) {
+    : DataFlowAnalysis(TypeID::get<DeadCodeAnalysis>(), solver) {
   registerPointKind<CFGEdge>();
 }
 
@@ -126,7 +126,7 @@ LogicalResult DeadCodeAnalysis::initialize(Operation *top) {
     if (region.empty())
       continue;
     auto *state = getOrCreate<Executable>(&region.front());
-    propagateIfChanged(state, state->setToLive());
+    state->propagateIfChanged(state->setToLive());
   }
 
   // Mark as overdefined the predecessors of symbol callables with potentially
@@ -154,7 +154,7 @@ void DeadCodeAnalysis::initializeSymbolCallables(Operation *top) {
       // potentially unknown callsites.
       if (symbol.isPublic() || (!allUsesVisible && symbol.isNested())) {
         auto *state = getOrCreate<PredecessorState>(callable);
-        propagateIfChanged(state, state->setHasUnknownPredecessors());
+        state->propagateIfChanged(state->setHasUnknownPredecessors());
       }
       foundSymbolCallable = true;
     }
@@ -171,7 +171,7 @@ void DeadCodeAnalysis::initializeSymbolCallables(Operation *top) {
       // we can't track information for any nested symbols.
       return top->walk([&](CallableOpInterface callable) {
         auto *state = getOrCreate<PredecessorState>(callable);
-        propagateIfChanged(state, state->setHasUnknownPredecessors());
+        state->propagateIfChanged(state->setHasUnknownPredecessors());
       });
     }
 
@@ -182,7 +182,7 @@ void DeadCodeAnalysis::initializeSymbolCallables(Operation *top) {
       // know all callsites.
       Operation *symbol = symbolTable.lookupSymbolIn(top, use.getSymbolRef());
       auto *state = getOrCreate<PredecessorState>(symbol);
-      propagateIfChanged(state, state->setHasUnknownPredecessors());
+      state->propagateIfChanged(state->setHasUnknownPredecessors());
     }
   };
   SymbolTable::walkSymbolTables(top, /*allSymUsesVisible=*/!top->getBlock(),
@@ -218,11 +218,23 @@ LogicalResult DeadCodeAnalysis::initializeRecursively(Operation *op) {
   return success();
 }
 
+bool DeadCodeAnalysis::provides(TypeID stateID, ProgramPoint point) const {
+  if (stateID == TypeID::get<Executable>())
+    return point.is<Block *>() || point.is_generic<CFGEdge>();
+  if (stateID == TypeID::get<PredecessorState>()) {
+    if (auto *op = point.dyn_cast<Operation *>())
+      return isa<RegionBranchOpInterface, CallOpInterface>(op);
+    if (auto *block = point.dyn_cast<Block *>())
+      return block->isEntryBlock();
+  }
+  return false;
+}
+
 void DeadCodeAnalysis::markEdgeLive(Block *from, Block *to) {
   auto *state = getOrCreate<Executable>(to);
-  propagateIfChanged(state, state->setToLive());
+  state->propagateIfChanged(state->setToLive());
   auto *edgeState = getOrCreate<Executable>(getProgramPoint<CFGEdge>(from, to));
-  propagateIfChanged(edgeState, edgeState->setToLive());
+  edgeState->propagateIfChanged(edgeState->setToLive());
 }
 
 void DeadCodeAnalysis::markEntryBlocksLive(Operation *op) {
@@ -230,7 +242,7 @@ void DeadCodeAnalysis::markEntryBlocksLive(Operation *op) {
     if (region.empty())
       continue;
     auto *state = getOrCreate<Executable>(&region.front());
-    propagateIfChanged(state, state->setToLive());
+    state->propagateIfChanged(state->setToLive());
   }
 }
 
@@ -318,11 +330,11 @@ void DeadCodeAnalysis::visitCallOperation(CallOpInterface call) {
       !isExternalCallable(callableOp)) {
     // Add the live callsite.
     auto *callsites = getOrCreate<PredecessorState>(callableOp);
-    propagateIfChanged(callsites, callsites->join(call));
+    callsites->propagateIfChanged(callsites->join(call));
   } else {
     // Mark this call op's predecessors as overdefined.
     auto *predecessors = getOrCreate<PredecessorState>(call);
-    propagateIfChanged(predecessors, predecessors->setHasUnknownPredecessors());
+    predecessors->propagateIfChanged(predecessors->setHasUnknownPredecessors());
   }
 }
 
@@ -331,11 +343,11 @@ void DeadCodeAnalysis::visitCallOperation(CallOpInterface call) {
 /// analysis should bail out.
 static Optional<SmallVector<Attribute>> getOperandValuesImpl(
     Operation *op,
-    function_ref<const Lattice<ConstantValue> *(Value)> getLattice) {
+    function_ref<const ConstantValueLattice *(Value)> getLattice) {
   SmallVector<Attribute> operands;
   operands.reserve(op->getNumOperands());
   for (Value operand : op->getOperands()) {
-    const Lattice<ConstantValue> *cv = getLattice(operand);
+    const ConstantValueLattice *cv = getLattice(operand);
     // If any of the operands' values are uninitialized, bail out.
     if (cv->isUninitialized())
       return {};
@@ -347,7 +359,7 @@ static Optional<SmallVector<Attribute>> getOperandValuesImpl(
 Optional<SmallVector<Attribute>>
 DeadCodeAnalysis::getOperandValues(Operation *op) {
   return getOperandValuesImpl(op, [&](Value value) {
-    auto *lattice = getOrCreate<Lattice<ConstantValue>>(value);
+    auto *lattice = getOrCreate<ConstantValueLattice>(value);
     lattice->useDefSubscribe(this);
     return lattice;
   });
@@ -385,11 +397,10 @@ void DeadCodeAnalysis::visitRegionBranchOperation(
                              : ProgramPoint(branch);
     // Mark the entry block as executable.
     auto *state = getOrCreate<Executable>(point);
-    propagateIfChanged(state, state->setToLive());
+    state->propagateIfChanged(state->setToLive());
     // Add the parent op as a predecessor.
     auto *predecessors = getOrCreate<PredecessorState>(point);
-    propagateIfChanged(
-        predecessors,
+    predecessors->propagateIfChanged(
         predecessors->join(branch, successor.getSuccessorInputs()));
   }
 }
@@ -410,14 +421,14 @@ void DeadCodeAnalysis::visitRegionTerminator(Operation *op,
     PredecessorState *predecessors;
     if (Region *region = successor.getSuccessor()) {
       auto *state = getOrCreate<Executable>(&region->front());
-      propagateIfChanged(state, state->setToLive());
+      state->propagateIfChanged(state->setToLive());
       predecessors = getOrCreate<PredecessorState>(&region->front());
     } else {
       // Add this terminator as a predecessor to the parent op.
       predecessors = getOrCreate<PredecessorState>(branch);
     }
-    propagateIfChanged(predecessors,
-                       predecessors->join(op, successor.getSuccessorInputs()));
+    predecessors->propagateIfChanged(
+        predecessors->join(op, successor.getSuccessorInputs()));
   }
 }
 
@@ -434,12 +445,12 @@ void DeadCodeAnalysis::visitCallableTerminator(Operation *op,
     assert(isa<CallOpInterface>(predecessor));
     auto *predecessors = getOrCreate<PredecessorState>(predecessor);
     if (canResolve) {
-      propagateIfChanged(predecessors, predecessors->join(op));
+      predecessors->propagateIfChanged(predecessors->join(op));
     } else {
       // If the terminator is not a return-like, then conservatively assume we
       // can't resolve the predecessor.
-      propagateIfChanged(predecessors,
-                         predecessors->setHasUnknownPredecessors());
+      predecessors->propagateIfChanged(
+          predecessors->setHasUnknownPredecessors());
     }
   }
 }
@@ -449,8 +460,8 @@ void DeadCodeAnalysis::visitCallableTerminator(Operation *op,
 //===----------------------------------------------------------------------===//
 
 AbstractSparseDataFlowAnalysis::AbstractSparseDataFlowAnalysis(
-    DataFlowSolver &solver)
-    : DataFlowAnalysis(solver) {
+    TypeID analysisID, DataFlowSolver &solver)
+    : DataFlowAnalysis(analysisID, solver) {
   registerPointKind<CFGEdge>();
 }
 
@@ -702,13 +713,13 @@ const AbstractSparseLattice *
 AbstractSparseDataFlowAnalysis::getLatticeElementFor(ProgramPoint point,
                                                      Value value) {
   AbstractSparseLattice *state = getLatticeElement(value);
-  addDependency(state, point);
+  state->addDependency(this, point);
   return state;
 }
 
 void AbstractSparseDataFlowAnalysis::markPessimisticFixpoint(
     AbstractSparseLattice *lattice) {
-  propagateIfChanged(lattice, lattice->markPessimisticFixpoint());
+  lattice->propagateIfChanged(lattice->markPessimisticFixpoint(analysisID));
 }
 
 void AbstractSparseDataFlowAnalysis::markAllPessimisticFixpoint(
@@ -720,7 +731,7 @@ void AbstractSparseDataFlowAnalysis::markAllPessimisticFixpoint(
 
 void AbstractSparseDataFlowAnalysis::join(AbstractSparseLattice *lhs,
                                           const AbstractSparseLattice &rhs) {
-  propagateIfChanged(lhs, lhs->join(rhs));
+  lhs->propagateIfChanged(lhs->join(rhs, analysisID));
 }
 
 //===----------------------------------------------------------------------===//
@@ -728,8 +739,8 @@ void AbstractSparseDataFlowAnalysis::join(AbstractSparseLattice *lhs,
 //===----------------------------------------------------------------------===//
 
 void SparseConstantPropagation::visitOperation(
-    Operation *op, ArrayRef<const Lattice<ConstantValue> *> operands,
-    ArrayRef<Lattice<ConstantValue> *> results) {
+    Operation *op, ArrayRef<const ConstantValueLattice *> operands,
+    ArrayRef<ConstantValueLattice *> results) {
   LLVM_DEBUG(llvm::dbgs() << "SCP: Visiting operation: " << *op << "\n");
 
   // Don't try to simulate the results of a region operation as we can't
@@ -769,14 +780,14 @@ void SparseConstantPropagation::visitOperation(
   // Merge the fold results into the lattice for this operation.
   assert(foldResults.size() == op->getNumResults() && "invalid result size");
   for (const auto it : llvm::zip(results, foldResults)) {
-    Lattice<ConstantValue> *lattice = std::get<0>(it);
+    ConstantValueLattice *lattice = std::get<0>(it);
 
     // Merge in the result of the fold, either a constant or a value.
     OpFoldResult foldResult = std::get<1>(it);
     if (Attribute attr = foldResult.dyn_cast<Attribute>()) {
       LLVM_DEBUG(llvm::dbgs() << "Folded to constant: " << attr << "\n");
-      propagateIfChanged(lattice,
-                         lattice->join(ConstantValue(attr, op->getDialect())));
+      lattice->propagateIfChanged(
+          lattice->join(ConstantValue(attr, op->getDialect()), analysisID));
     } else {
       LLVM_DEBUG(llvm::dbgs()
                  << "Folded to value: " << foldResult.get<Value>() << "\n");
