@@ -47,7 +47,7 @@ public:
   void print(raw_ostream &os) const;
 
   /// The pessimistic value state of the constant value is unknown.
-  static ConstantValue getPessimisticValueState(Value value) { return {}; }
+  static ConstantValue getPessimisticValue(Value value) { return {}; }
 
   /// The union with another constant value is null if they are different, and
   /// the same if they are the same.
@@ -56,11 +56,28 @@ public:
     return lhs == rhs ? lhs : ConstantValue();
   }
 
+  static ConstantValue meet(const ConstantValue &lhs,
+                            const ConstantValue &rhs) {
+    if (lhs == rhs)
+      return lhs;
+    if (!lhs.constant)
+      return rhs;
+    if (!rhs.constant)
+      return lhs;
+    return ConstantValue();
+  }
+
 private:
   /// The constant value.
   Attribute constant;
   /// An dialect instance that can be used to materialize the constant.
   Dialect *dialect;
+};
+
+class ConstantValueState : public OptimisticSparseState<ConstantValue> {
+public:
+  using OptimisticSparseState::OptimisticSparseState;
+  using ElementT = SparseElement<ConstantValueState, MultiStateElement>;
 };
 
 //===----------------------------------------------------------------------===//
@@ -72,13 +89,13 @@ private:
 /// operands, by speculatively folding operations. When combined with dead-code
 /// analysis, this becomes sparse conditional constant propagation (SCCP).
 class SparseConstantPropagation
-    : public SparseDataFlowAnalysis<Lattice<ConstantValue>> {
+    : public SparseDataFlowAnalysis<ConstantValueState> {
 public:
   using SparseDataFlowAnalysis::SparseDataFlowAnalysis;
 
-  void visitOperation(Operation *op,
-                      ArrayRef<const Lattice<ConstantValue> *> operands,
-                      ArrayRef<Lattice<ConstantValue> *> results) override;
+  void
+  visitOperation(Operation *op, ArrayRef<const ConstantValueState *> operands,
+                 ArrayRef<ConstantValueState::ElementT *> results) override;
 };
 
 } // end namespace dataflow
