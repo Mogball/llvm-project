@@ -29,6 +29,22 @@ void Executable::print(raw_ostream &os) const {
   os << (live ? "live" : "dead");
 }
 
+ChangeResult Executable::join(const AbstractState &rhs) {
+  auto &state = static_cast<const Executable &>(rhs);
+  if (live || !state.live)
+    return ChangeResult::NoChange;
+  live = state.live;
+  return ChangeResult::Change;
+}
+
+ChangeResult Executable::meet(const AbstractState &rhs) {
+  auto &state = static_cast<const Executable &>(rhs);
+  if (!live || state.live)
+    return ChangeResult::NoChange;
+  live = state.live;
+  return ChangeResult::Change;
+}
+
 //===----------------------------------------------------------------------===//
 // PredecessorState
 //===----------------------------------------------------------------------===//
@@ -54,6 +70,45 @@ ChangeResult PredecessorState::join(Operation *predecessor, ValueRange inputs) {
       curInputs = inputs;
       result |= ChangeResult::Change;
     }
+  }
+  return result;
+}
+
+ChangeResult PredecessorState::join(const AbstractState &rhs) {
+  auto &state = static_cast<const PredecessorState &>(rhs);
+  ChangeResult result = ChangeResult::NoChange;
+  if (allKnown && !state.allKnown) {
+    allKnown = false;
+    result |= ChangeResult::Change;
+  }
+  size_t prevSize = knownPredecessors.size();
+  knownPredecessors.insert(state.knownPredecessors.begin(),
+                           state.knownPredecessors.end());
+  if (prevSize != knownPredecessors.size())
+    result |= ChangeResult::Change;
+  // Combine the successor inputs assuming they are always the same for each
+  // predecessor when computed by any analysis.
+  successorInputs.insert(state.successorInputs.begin(),
+                         state.successorInputs.end());
+  return result;
+}
+
+ChangeResult PredecessorState::meet(const AbstractState &rhs) {
+  auto &state = static_cast<const PredecessorState &>(rhs);
+  ChangeResult result = ChangeResult::NoChange;
+  if (!allKnown && state.allKnown) {
+    allKnown = true;
+    result |= ChangeResult::Change;
+  }
+  auto it = knownPredecessors.begin();
+  while (it != knownPredecessors.end()) {
+    if (!state.knownPredecessors.contains(*it)) {
+      it = knownPredecessors.erase(it);
+      successorInputs.erase(*it);
+      result |= ChangeResult::Change;
+      continue;
+    }
+    ++it;
   }
   return result;
 }

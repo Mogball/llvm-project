@@ -56,6 +56,8 @@ public:
     return lhs == rhs ? lhs : ConstantValue();
   }
 
+  /// The intersection with another constant value is null if they are known
+  /// but unequal or the known value.
   static ConstantValue meet(const ConstantValue &lhs,
                             const ConstantValue &rhs) {
     if (lhs == rhs)

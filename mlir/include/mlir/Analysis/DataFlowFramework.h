@@ -246,8 +246,7 @@ private:
   StorageUniquer uniquer;
 
   /// A type-erased map of program points to associated analysis states.
-  DenseMap<std::pair<TypeID, ProgramPoint>,
-           std::unique_ptr<AbstractElement>>
+  DenseMap<std::pair<TypeID, ProgramPoint>, std::unique_ptr<AbstractElement>>
       elements;
 
   /// Allow the base child analysis class to access the internals of the solver.
@@ -298,32 +297,6 @@ private:
 #endif // LLVM_ENABLE_ABI_BREAKING_CHECKS
 
   friend class ::mlir::DataFlowSolver;
-};
-
-template <typename StateT, typename BaseT = AbstractElement>
-class SingleStateElement : public BaseT {
-public:
-  template <typename PointT>
-  explicit SingleStateElement(DataFlowSolver &solver, PointT point)
-      : BaseT(solver, point), state(point) {}
-
-  const StateT *get() const override { return &state; }
-
-  void update(DataFlowAnalysis *provider,
-              function_ref<ChangeResult(AbstractState *)> updateFn) override {
-    if (updateFn(&state) == ChangeResult::Change)
-      BaseT::propagateUpdate();
-  }
-  void update(DataFlowAnalysis *provider,
-              function_ref<ChangeResult(StateT *)> updateFn) {
-    return update(provider, function_ref<ChangeResult(AbstractState *)>(
-                                [updateFn](AbstractState *state) {
-                                  return updateFn(static_cast<StateT *>(state));
-                                }));
-  }
-
-private:
-  StateT state;
 };
 
 /// StateT is required to implement `join` and `meet`.
@@ -508,8 +481,7 @@ typename StateT::ElementT *DataFlowSolver::getOrCreate(PointT point) {
   return static_cast<ElementT *>(element.get());
 }
 
-inline raw_ostream &operator<<(raw_ostream &os,
-                               const AbstractState &state) {
+inline raw_ostream &operator<<(raw_ostream &os, const AbstractState &state) {
   state.print(os);
   return os;
 }

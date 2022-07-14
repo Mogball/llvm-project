@@ -65,7 +65,7 @@ private:
 class IntegerValueRangeState : public OptimisticSparseState<IntegerValueRange> {
 public:
   using OptimisticSparseState::OptimisticSparseState;
-  using ElementT = SparseElement<IntegerValueRangeState, SingleStateElement>;
+  using ElementT = SparseElement<IntegerValueRangeState, MultiStateElement>;
 };
 
 /// Integer range analysis determines the integer value range of SSA values

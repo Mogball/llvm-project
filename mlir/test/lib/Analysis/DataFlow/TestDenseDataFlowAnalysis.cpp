@@ -1,4 +1,4 @@
-//===- TestDeadCodeAnalysis.cpp - Test dead code analysis -----------------===//
+//===- TestDenseDataFlowAnalysis.cpp - Test dense dataflow analysis -------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -17,7 +17,7 @@ using namespace mlir;
 using namespace mlir::dataflow;
 
 namespace {
-/// This lattice represents a single underlying value for an SSA value.
+/// This value represents a single underlying value for an SSA value.
 class UnderlyingValue {
 public:
   /// The pessimistic underlying value of a value is itself.
@@ -37,6 +37,11 @@ public:
     return lhs.underlyingValue == rhs.underlyingValue ? lhs : UnderlyingValue();
   }
 
+  static UnderlyingValue meet(const UnderlyingValue &lhs,
+                              const UnderlyingValue &rhs) {
+    llvm_unreachable("unimplemented");
+  }
+
   /// Compare underlying values.
   bool operator==(const UnderlyingValue &rhs) const {
     return underlyingValue == rhs.underlyingValue;
@@ -48,20 +53,20 @@ private:
   Value underlyingValue;
 };
 
-/// This lattice represents, for a given memory resource, the potential last
+/// This dense state represents, for a given memory resource, the potential last
 /// operations that modified the resource.
 class LastModification : public AbstractDenseState {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LastModification)
 
-  using ElementT = SingleStateElement<LastModification, AbstractDenseElement>;
+  using ElementT = MultiStateElement<LastModification, AbstractDenseElement>;
 
   explicit LastModification(ProgramPoint point) {}
 
-  /// The lattice is always initialized.
+  /// The state is always initialized.
   bool isUninitialized() const override { return false; }
 
-  /// Mark the lattice as having reached its pessimistic fixpoint. That is, the
+  /// Mark the state as having reached its pessimistic fixpoint. That is, the
   /// last modifications of all memory resources are unknown.
   ChangeResult markPessimisticFixpoint() override {
     if (lastMods.empty())
@@ -70,12 +75,12 @@ public:
     return ChangeResult::Change;
   }
 
-  /// The lattice is never at a fixpoint.
+  /// The state is never at a fixpoint.
   bool isAtFixpoint() const override { return false; }
 
   /// Join the last modifications.
-  ChangeResult join(const AbstractDenseState &lattice) override {
-    const auto &rhs = static_cast<const LastModification &>(lattice);
+  ChangeResult join(const AbstractDenseState &state) override {
+    const auto &rhs = static_cast<const LastModification &>(state);
     ChangeResult result = ChangeResult::NoChange;
     for (const auto &mod : rhs.lastMods) {
       auto &lhsMod = lastMods[mod.first];
@@ -85,6 +90,10 @@ public:
       }
     }
     return result;
+  }
+
+  ChangeResult meet(const AbstractDenseState &state) {
+    llvm_unreachable("unimplemented");
   }
 
   /// Set the last modification of a value.
@@ -136,12 +145,12 @@ public:
                       LastModification::ElementT *after) override;
 };
 
-/// Define the lattice class explicitly to provide a type ID.
+/// Define the state class explicitly to provide a type ID.
 struct UnderlyingValueState : public OptimisticSparseState<UnderlyingValue> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(UnderlyingValueState)
 
   using OptimisticSparseState::OptimisticSparseState;
-  using ElementT = SparseElement<UnderlyingValueState, SingleStateElement>;
+  using ElementT = SparseElement<UnderlyingValueState, MultiStateElement>;
 };
 
 /// An analysis that uses forwarding of values along control-flow and callgraph
@@ -245,7 +254,7 @@ struct TestLastModifiedPass
         return;
       os << "test_tag: " << tag.getValue() << ":\n";
       const auto *lastMods = solver.lookup<LastModification>(op);
-      assert(lastMods && "expected a dense lattice");
+      assert(lastMods && "expected a dense state");
       for (auto &it : llvm::enumerate(op->getOperands())) {
         os << " operand #" << it.index() << "\n";
         Value value = getMostUnderlyingValue(it.value(), [&](Value value) {

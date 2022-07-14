@@ -55,20 +55,6 @@ public:
   explicit AbstractSparseElement(DataFlowSolver &solver, Value value)
       : AbstractElement(solver, value) {}
 
-  virtual void useDefSubscribe(DataFlowAnalysis *analysis) = 0;
-
-  virtual const AbstractSparseState *get() const override = 0;
-};
-
-/// This class represents a sparse analysis element. A sparse element is
-/// attached to an SSA value and can track its dependents through the value's
-/// use-def chain. This is useful for improving the performance of sparse
-/// analyses where users are always dependents of SSA value elements.
-template <typename StateT, template <typename, typename> class BaseT>
-class SparseElement : public BaseT<StateT, AbstractSparseElement> {
-public:
-  using BaseT<StateT, AbstractSparseElement>::BaseT;
-
   /// When the sparse element gets updated, propagate an update to users of the
   /// value using its use-def chain to subscribed analyses.
   void onUpdate() override {
@@ -80,15 +66,27 @@ public:
   /// Subscribe an analysis to updates of the sparse element. When the element
   /// changes, subscribed analyses are re-invoked on all users of the value.
   /// This is more efficient than relying on the dependency map.
-  void useDefSubscribe(DataFlowAnalysis *analysis) override {
+  void useDefSubscribe(DataFlowAnalysis *analysis) {
     useDefSubscribers.insert(analysis);
   }
+
+  virtual const AbstractSparseState *get() const override = 0;
 
 private:
   /// A set of analyses that should be updated when this element changes.
   SetVector<DataFlowAnalysis *, SmallVector<DataFlowAnalysis *, 4>,
             SmallPtrSet<DataFlowAnalysis *, 4>>
       useDefSubscribers;
+};
+
+/// This class represents a sparse analysis element. A sparse element is
+/// attached to an SSA value and can track its dependents through the value's
+/// use-def chain. This is useful for improving the performance of sparse
+/// analyses where users are always dependents of SSA value elements.
+template <typename StateT, template <typename, typename> class BaseT>
+class SparseElement : public BaseT<StateT, AbstractSparseElement> {
+public:
+  using BaseT<StateT, AbstractSparseElement>::BaseT;
 };
 
 //===----------------------------------------------------------------------===//
@@ -233,10 +231,10 @@ protected:
 
   /// The operation transfer function. Given the operand lattices, this
   /// function is expected to set the result lattices.
-  virtual void visitOperationImpl(
-      Operation *op,
-      ArrayRef<const AbstractSparseState *> operandLattices,
-      ArrayRef<AbstractSparseElement *> resultLattices) = 0;
+  virtual void
+  visitOperationImpl(Operation *op,
+                     ArrayRef<const AbstractSparseState *> operandLattices,
+                     ArrayRef<AbstractSparseElement *> resultLattices) = 0;
 
   /// Given an operation with region control-flow, the lattices of the operands,
   /// and a region successor, compute the lattice values for block arguments
@@ -244,8 +242,7 @@ protected:
   /// of loops).
   virtual void visitNonControlFlowArgumentsImpl(
       Operation *op, const RegionSuccessor &successor,
-      ArrayRef<AbstractSparseElement *> argLattices,
-      unsigned firstIndex) = 0;
+      ArrayRef<AbstractSparseElement *> argLattices, unsigned firstIndex) = 0;
 
   /// Get the lattice element of a value.
   virtual AbstractSparseElement *getLatticeElement(Value value) = 0;
@@ -253,16 +250,14 @@ protected:
   /// Get a read-only lattice element for a value and add it as a dependency to
   /// a program point.
   const AbstractSparseState *getLatticeElementFor(ProgramPoint point,
-                                                          Value value);
+                                                  Value value);
 
   /// Mark the given lattice elements as having reached their pessimistic
   /// fixpoints and propagate an update if any changed.
-  void markAllPessimisticFixpoint(
-      ArrayRef<AbstractSparseElement *> elements);
+  void markAllPessimisticFixpoint(ArrayRef<AbstractSparseElement *> elements);
 
   /// Join the lattice element and propagate and update if it changed.
-  void join(AbstractSparseElement *lhs,
-            const AbstractSparseState &rhs);
+  void join(AbstractSparseElement *lhs, const AbstractSparseState &rhs);
 
 private:
   /// Recursively initialize the analysis on nested operations and blocks.
@@ -284,10 +279,9 @@ private:
   /// operation `branch`, which can either be the entry block of one of the
   /// regions or the parent operation itself, and set either the argument or
   /// parent result lattices.
-  void
-  visitRegionSuccessors(ProgramPoint point, RegionBranchOpInterface branch,
-                        Optional<unsigned> successorIndex,
-                        ArrayRef<AbstractSparseElement *> elements);
+  void visitRegionSuccessors(ProgramPoint point, RegionBranchOpInterface branch,
+                             Optional<unsigned> successorIndex,
+                             ArrayRef<AbstractSparseElement *> elements);
 };
 
 //===----------------------------------------------------------------------===//
@@ -350,8 +344,7 @@ protected:
   void
   markAllPessimisticFixpoint(ArrayRef<typename StateT::ElementT *> elements) {
     AbstractSparseDataFlowAnalysis::markAllPessimisticFixpoint(
-        {reinterpret_cast<AbstractSparseElement *const *>(
-             elements.begin()),
+        {reinterpret_cast<AbstractSparseElement *const *>(elements.begin()),
          elements.size()});
   }
 
@@ -359,8 +352,7 @@ private:
   /// Type-erased wrappers that convert the abstract lattice operands to derived
   /// lattices and invoke the virtual hooks operating on the derived lattices.
   void visitOperationImpl(
-      Operation *op,
-      ArrayRef<const AbstractSparseState *> operandLattices,
+      Operation *op, ArrayRef<const AbstractSparseState *> operandLattices,
       ArrayRef<AbstractSparseElement *> resultLattices) override {
     visitOperation(
         op,

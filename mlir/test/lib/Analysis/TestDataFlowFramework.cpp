@@ -18,7 +18,7 @@ class FooState : public AbstractState {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FooState)
 
-  using ElementT = SingleStateElement<FooState>;
+  using ElementT = MultiStateElement<FooState>;
 
   explicit FooState(ProgramPoint point) {}
 
@@ -47,6 +47,10 @@ public:
     uint64_t before = *state;
     state = before ^ value;
     return before == *state ? ChangeResult::NoChange : ChangeResult::Change;
+  }
+
+  ChangeResult meet(const FooState &rhs) {
+    llvm_unreachable("unimplemented");
   }
 
   /// Set the value of the state directly.

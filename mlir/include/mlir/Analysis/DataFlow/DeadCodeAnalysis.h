@@ -59,9 +59,9 @@ public:
 class Executable : public AbstractState {
 public:
   template <typename ExecutableT>
-  class Element : public SingleStateElement<ExecutableT> {
+  class Element : public MultiStateElement<ExecutableT> {
   public:
-    using SingleStateElement<ExecutableT>::SingleStateElement;
+    using MultiStateElement<ExecutableT>::MultiStateElement;
 
     /// When the state of the program point is changed to live, re-invoke
     /// subscribed analyses on the operations in the block and on the block
@@ -100,6 +100,14 @@ public:
   /// Optimistically assume the program point is dead.
   explicit Executable(ProgramPoint point) : live(false) {}
 
+  /// Combine the value of another executable state. If any are known to be
+  /// executable, then the state is live.
+  ChangeResult join(const AbstractState &rhs);
+
+  /// Combine the value of another executable state. If not all are known to be
+  /// executable, then the state is optimistically assumed to be dead.
+  ChangeResult meet(const AbstractState &rhs);
+
   /// Set the state of the program point to live.
   ChangeResult setToLive();
 
@@ -136,7 +144,7 @@ private:
 /// control-flow predecessors can be known.
 class PredecessorState : public AbstractState {
 public:
-  using ElementT = SingleStateElement<PredecessorState>;
+  using ElementT = MultiStateElement<PredecessorState>;
 
   explicit PredecessorState(ProgramPoint point) {}
 
@@ -162,6 +170,16 @@ public:
     return successorInputs.lookup(predecessor);
   }
 
+  /// Combine the information from another predecessor state by taking the
+  /// union of the predecessors. If either state has unknown predecessors,
+  /// then the resultant state also has unknown predecessors.
+  ChangeResult join(const AbstractState &rhs);
+
+  /// Combine the information from another predecessor state by taking the
+  /// intersection of the predecessors. If either state has all predecessors
+  /// known, then the resultant state has all predecessors known.
+  ChangeResult meet(const AbstractState &rhs);
+
   /// Add a known predecessor.
   ChangeResult join(Operation *predecessor);
 
@@ -179,7 +197,7 @@ private:
       knownPredecessors;
 
   /// The successor inputs when branching from a given predecessor.
-  DenseMap<Operation *, ValueRange> successorInputs;
+  llvm::SmallDenseMap<Operation *, ValueRange, 4> successorInputs;
 };
 
 //===----------------------------------------------------------------------===//

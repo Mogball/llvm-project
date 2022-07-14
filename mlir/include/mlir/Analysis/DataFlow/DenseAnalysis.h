@@ -128,9 +128,8 @@ private:
 /// `StateT` is expected to be a subclass of `AbstractDenseLattice`.
 template <typename StateT>
 class DenseDataFlowAnalysis : public AbstractDenseDataFlowAnalysis {
-  static_assert(
-      std::is_base_of<AbstractDenseState, StateT>::value,
-      "analysis state class expected to subclass AbstractDenseState");
+  static_assert(std::is_base_of<AbstractDenseState, StateT>::value,
+                "analysis state class expected to subclass AbstractDenseState");
 
 public:
   using AbstractDenseDataFlowAnalysis::AbstractDenseDataFlowAnalysis;
